@@ -1,6 +1,13 @@
 # 墨夜阅读器
 
-Mac 端原生 JM（禁漫）漫画阅读与下载器，当前版本 **3.5.5**。项目全程由 ChatGPT 制作；作者编程基础有限，欢迎友善指教（请轻喷）。
+Mac 端原生 JM（禁漫）漫画阅读与下载器，另提供 iPadOS 移植版 IPA，当前版本 **3.5.5**。项目全程由 ChatGPT 制作；作者编程基础有限，欢迎友善指教（请轻喷）。
+
+## 下载
+
+在 GitHub Releases 下载对应版本：
+
+- **macOS**：`MoyeReader-3.5.5-macOS-arm64.dmg`，适用于 Apple 芯片及 macOS 26 或以上。
+- **iPadOS**：`MoyeReader-iPadOS-3.5.5-unsigned.ipa`，未签名；需要自行签名后侧载。此构建最低支持 iOS/iPadOS 17。
 
 ## 源码包与运行
 
