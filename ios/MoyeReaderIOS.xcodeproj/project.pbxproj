@@ -1,0 +1,247 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {};
+	objectVersion = 56;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		A00000000000000000000001 /* MoyeReaderIOSApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000011 /* MoyeReaderIOSApp.swift */; };
+		A00000000000000000000002 /* MoyeHomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000012 /* MoyeHomeView.swift */; };
+		A00000000000000000000004 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000014 /* Assets.xcassets */; };
+		A00000000000000000000005 /* ThirdPartyNotices.txt in Resources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000015 /* ThirdPartyNotices.txt */; };
+		A00000000000000000000006 /* MoyeCatalogService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000018 /* MoyeCatalogService.swift */; };
+		A00000000000000000000007 /* MoyeDownloadFeature.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000019 /* MoyeDownloadFeature.swift */; };
+		B00000000000000000000001 /* MoyeRuntimeData.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000002 /* MoyeRuntimeData.swift */; };
+		B00000000000000000000003 /* MoyeSiteScripts.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000004 /* MoyeSiteScripts.swift */; };
+		B00000000000000000000005 /* MoyeComicMetadata.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000006 /* MoyeComicMetadata.swift */; };
+		B00000000000000000000007 /* MoyeReaderViewport.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000008 /* MoyeReaderViewport.swift */; };
+		B00000000000000000000009 /* MoyeComicReaderScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = B0000000000000000000000A /* MoyeComicReaderScreen.swift */; };
+		B0000000000000000000000B /* MoyePageExporter.swift in Sources */ = {isa = PBXBuildFile; fileRef = B0000000000000000000000C /* MoyePageExporter.swift */; };
+		B0000000000000000000000D /* MoyeWorkSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = B0000000000000000000000E /* MoyeWorkSession.swift */; };
+		B00000000000000000000011 /* MoyeComicCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000012 /* MoyeComicCard.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		A00000000000000000000011 /* MoyeReaderIOSApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MoyeReaderIOSApp.swift; sourceTree = "<group>"; };
+		A00000000000000000000012 /* MoyeHomeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MoyeHomeView.swift; sourceTree = "<group>"; };
+		A00000000000000000000014 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		A00000000000000000000015 /* ThirdPartyNotices.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = ThirdPartyNotices.txt; sourceTree = "<group>"; };
+		A00000000000000000000016 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		A00000000000000000000017 /* MoyeReaderIOS.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "墨夜阅读器.app"; sourceTree = BUILT_PRODUCTS_DIR; };
+		A00000000000000000000018 /* MoyeCatalogService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MoyeCatalogService.swift; sourceTree = "<group>"; };
+		A00000000000000000000019 /* MoyeDownloadFeature.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MoyeDownloadFeature.swift; sourceTree = "<group>"; };
+		B00000000000000000000002 /* MoyeRuntimeData.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MoyeRuntimeData.swift; sourceTree = "<group>"; };
+		B00000000000000000000004 /* MoyeSiteScripts.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MoyeSiteScripts.swift; sourceTree = "<group>"; };
+		B00000000000000000000006 /* MoyeComicMetadata.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MoyeComicMetadata.swift; sourceTree = "<group>"; };
+		B00000000000000000000008 /* MoyeReaderViewport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MoyeReaderViewport.swift; sourceTree = "<group>"; };
+		B0000000000000000000000A /* MoyeComicReaderScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MoyeComicReaderScreen.swift; sourceTree = "<group>"; };
+		B0000000000000000000000C /* MoyePageExporter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MoyePageExporter.swift; sourceTree = "<group>"; };
+		B0000000000000000000000E /* MoyeWorkSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MoyeWorkSession.swift; sourceTree = "<group>"; };
+		B00000000000000000000012 /* MoyeComicCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MoyeComicCard.swift; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		A00000000000000000000021 /* Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		A00000000000000000000031 = {
+			isa = PBXGroup;
+			children = (
+				A00000000000000000000032 /* MoyeReaderIOS */,
+				A00000000000000000000033 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		A00000000000000000000032 /* MoyeReaderIOS */ = {
+			isa = PBXGroup;
+			children = (
+				A00000000000000000000011 /* MoyeReaderIOSApp.swift */,
+				A00000000000000000000012 /* MoyeHomeView.swift */,
+				A00000000000000000000018 /* MoyeCatalogService.swift */,
+				A00000000000000000000019 /* MoyeDownloadFeature.swift */,
+				B00000000000000000000012 /* MoyeComicCard.swift */,
+				B0000000000000000000000E /* MoyeWorkSession.swift */,
+				B00000000000000000000002 /* MoyeRuntimeData.swift */,
+				B00000000000000000000004 /* MoyeSiteScripts.swift */,
+				B00000000000000000000006 /* MoyeComicMetadata.swift */,
+				B00000000000000000000008 /* MoyeReaderViewport.swift */,
+				B0000000000000000000000A /* MoyeComicReaderScreen.swift */,
+				B0000000000000000000000C /* MoyePageExporter.swift */,
+				A00000000000000000000014 /* Assets.xcassets */,
+				A00000000000000000000015 /* ThirdPartyNotices.txt */,
+				A00000000000000000000016 /* Info.plist */,
+			);
+			path = MoyeReaderIOS;
+			sourceTree = "<group>";
+		};
+		A00000000000000000000033 /* Products */ = {
+			isa = PBXGroup;
+			children = (A00000000000000000000017 /* MoyeReaderIOS.app */,);
+			name = Products;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		A00000000000000000000041 /* MoyeReaderIOS */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A00000000000000000000051 /* Build configuration list for PBXNativeTarget */;
+			buildPhases = (
+				A00000000000000000000061 /* Sources */,
+				A00000000000000000000021 /* Frameworks */,
+				A00000000000000000000062 /* Resources */,
+			);
+			buildRules = ();
+			dependencies = ();
+			name = MoyeReaderIOS;
+			productName = "墨夜阅读器";
+			productReference = A00000000000000000000017 /* MoyeReaderIOS.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		A00000000000000000000071 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 2700;
+				TargetAttributes = {A00000000000000000000041 = {CreatedOnToolsVersion = 27.0; };};
+			};
+			buildConfigurationList = A00000000000000000000052 /* Build configuration list for PBXProject */;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = zh_CN;
+			hasScannedForEncodings = 0;
+			knownRegions = (zh_CN, en, Base,);
+			mainGroup = A00000000000000000000031;
+			productRefGroup = A00000000000000000000033 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (A00000000000000000000041 /* MoyeReaderIOS */,);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		A00000000000000000000062 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A00000000000000000000004 /* Assets.xcassets in Resources */,
+				A00000000000000000000005 /* ThirdPartyNotices.txt in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		A00000000000000000000061 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A00000000000000000000001 /* MoyeReaderIOSApp.swift in Sources */,
+				A00000000000000000000002 /* MoyeHomeView.swift in Sources */,
+				A00000000000000000000006 /* MoyeCatalogService.swift in Sources */,
+				A00000000000000000000007 /* MoyeDownloadFeature.swift in Sources */,
+				B00000000000000000000011 /* MoyeComicCard.swift in Sources */,
+				B0000000000000000000000D /* MoyeWorkSession.swift in Sources */,
+				B00000000000000000000001 /* MoyeRuntimeData.swift in Sources */,
+				B00000000000000000000003 /* MoyeSiteScripts.swift in Sources */,
+				B00000000000000000000005 /* MoyeComicMetadata.swift in Sources */,
+				B00000000000000000000007 /* MoyeReaderViewport.swift in Sources */,
+				B00000000000000000000009 /* MoyeComicReaderScreen.swift in Sources */,
+				B0000000000000000000000B /* MoyePageExporter.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		A00000000000000000000081 /* Debug project */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				SDKROOT = iphoneos;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		A00000000000000000000082 /* Release project */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				SDKROOT = iphoneos;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+		A00000000000000000000083 /* Debug target */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = YES;
+				CODE_SIGNING_ALLOWED = NO;
+				CODE_SIGNING_REQUIRED = NO;
+				CURRENT_PROJECT_VERSION = 41;
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = MoyeReaderIOS/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks";
+				MARKETING_VERSION = 3.5.14;
+				OTHER_SWIFT_FLAGS = ("$(inherited)", "-file-prefix-map", "$(SRCROOT)=/MoyeReader/ios", "-debug-prefix-map", "$(SRCROOT)=/MoyeReader/ios", "-file-compilation-dir", "/MoyeReader/ios",);
+				PRODUCT_BUNDLE_IDENTIFIER = com.moye.moyereader.ios;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		A00000000000000000000084 /* Release target */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = YES;
+				CODE_SIGNING_ALLOWED = NO;
+				CODE_SIGNING_REQUIRED = NO;
+				CURRENT_PROJECT_VERSION = 41;
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = MoyeReaderIOS/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks";
+				MARKETING_VERSION = 3.5.14;
+				OTHER_SWIFT_FLAGS = ("$(inherited)", "-file-prefix-map", "$(SRCROOT)=/MoyeReader/ios", "-debug-prefix-map", "$(SRCROOT)=/MoyeReader/ios", "-file-compilation-dir", "/MoyeReader/ios",);
+				PRODUCT_BUNDLE_IDENTIFIER = com.moye.moyereader.ios;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		A00000000000000000000051 /* Build configuration list for PBXNativeTarget */ = {isa = XCConfigurationList; buildConfigurations = (A00000000000000000000083 /* Debug target */, A00000000000000000000084 /* Release target */,); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+		A00000000000000000000052 /* Build configuration list for PBXProject */ = {isa = XCConfigurationList; buildConfigurations = (A00000000000000000000081 /* Debug project */, A00000000000000000000082 /* Release project */,); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+/* End XCConfigurationList section */
+	};
+	rootObject = A00000000000000000000071 /* Project object */;
+}

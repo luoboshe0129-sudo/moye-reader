@@ -20,7 +20,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
 #if MOYE_DIAGNOSTICS
         if Bundle.main.bundleIdentifier?.hasPrefix("com.moye.moyereader.review") == true, let defaults = UserDefaults(suiteName: "com.moye.moyereader") {
-            for key in ["MoyeShelf.DarkAppearance", "MoyeShelf.ComicColumns", "MoyeShelf.SiteRoute", "MoyeShelf.SessionUser.18comic.vip", "MoyeShelf.SessionUser.18comic.ink", "MoyeShelf.SessionUser.jmcomic-zzz.one", "MoyeShelf.SessionUser.jmcomic-zzz.org", "MoyeShelf.DownloadDirectory"] {
+            for key in ["MoyeShelf.DarkAppearance", "MoyeShelf.ComicColumns", "MoyeShelf.SiteRoute", "MoyeShelf.DownloadDirectory"] {
                 if let value = defaults.object(forKey: key) { UserDefaults.standard.set(value, forKey: key) }
             }
         }
@@ -28,7 +28,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 #if MOYE_DIAGNOSTICS
         if let path = Bundle.main.object(forInfoDictionaryKey: "MoyeVerificationDownloadDirectory") as? String { UserDefaults.standard.set(path, forKey: "MoyeShelf.DownloadDirectory") }
 #endif
-        // Discard caches from a previous interrupted run; account cookies are preserved.
+        // Discard reading files left by a previous interrupted run.
         MoyeRuntimeData.clearCaches {}
         UserDefaults.standard.removeObject(forKey: "MoyeShelf.LastComicQuery")
         NSApp.setActivationPolicy(.regular)
@@ -147,8 +147,9 @@ final class MoyeWindowController: NSWindowController {
     }
 }
 
-// Website sign-in persists. Reading files exist only in this launch’s temporary directory.
+// Website cookies stay in memory for this launch; reading files use a temporary directory.
 enum MoyeRuntimeData {
+    static let websiteDataStore = WKWebsiteDataStore.nonPersistent()
     static let imageSession: URLSession = {
         let config = URLSessionConfiguration.ephemeral
         config.urlCache = nil
@@ -168,7 +169,7 @@ enum MoyeRuntimeData {
         URLCache.shared.diskCapacity = 0
         try? FileManager.default.removeItem(at: temporaryRoot)
         let types: Set<String> = [WKWebsiteDataTypeDiskCache, WKWebsiteDataTypeMemoryCache, WKWebsiteDataTypeOfflineWebApplicationCache, WKWebsiteDataTypeFetchCache]
-        WKWebsiteDataStore.default().removeData(ofTypes: types, modifiedSince: .distantPast, completionHandler: completion)
+        websiteDataStore.removeData(ofTypes: types, modifiedSince: .distantPast, completionHandler: completion)
     }
 }
 

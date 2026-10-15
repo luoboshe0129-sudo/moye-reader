@@ -1,4 +1,10 @@
 .DS_Store
 outputs/
 .moye-build.*/
+.moye-package.*/
 *.log
+
+ios/build/
+ios/derived/
+ios-original/
+.moye-ios.*/

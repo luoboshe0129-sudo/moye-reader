@@ -16,52 +16,6 @@ private func moyeDiagnostic(_ event: String) {
 #endif
 }
 
-private enum ComicSessionStore {
-    private static func fileURL(host: String) -> URL? {
-        guard let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else { return nil }
-        return support.appendingPathComponent("MoyeShelf/SiteSessions", isDirectory: true).appendingPathComponent(host + ".plist")
-    }
-
-    static func save(_ cookies: [HTTPCookie], host: String) {
-        guard let url = fileURL(host: host) else { return }
-        let selected = cookies.filter {
-            let domain = $0.domain.trimmingCharacters(in: CharacterSet(charactersIn: ".")).lowercased()
-            return (domain == host || host.hasSuffix("." + domain)) && !["password", "pwd", "pass"].contains($0.name.lowercased())
-        }
-        guard selected.contains(where: { $0.name == "AVS" }) else { return }
-        let records = selected.map { cookie -> [String: Any] in
-            var record: [String: Any] = [:]
-            for (key, value) in cookie.properties ?? [:] {
-                if let value = value as? URL { record[key.rawValue] = value.absoluteString }
-                else { record[key.rawValue] = value }
-            }
-            return record
-        }
-        do {
-            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-            let data = try PropertyListSerialization.data(fromPropertyList: records, format: .binary, options: 0)
-            try data.write(to: url, options: .atomic)
-            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
-            moyeDiagnostic("session.saved.cookies=\(selected.count)")
-        } catch { moyeDiagnostic("session.save.failed") }
-    }
-
-    static func restore(host: String, into store: WKHTTPCookieStore, completion: @escaping () -> Void) {
-        guard let url = fileURL(host: host), let data = try? Data(contentsOf: url),
-              let records = (try? PropertyListSerialization.propertyList(from: data, options: [], format: nil)) as? [[String: Any]] else { completion(); return }
-        let group = DispatchGroup()
-        for record in records {
-            let properties = Dictionary(uniqueKeysWithValues: record.map { (HTTPCookiePropertyKey($0.key), $0.value) })
-            guard let cookie = HTTPCookie(properties: properties), cookie.expiresDate.map({ $0 > Date() }) ?? true else { continue }
-            let domain = cookie.domain.trimmingCharacters(in: CharacterSet(charactersIn: ".")).lowercased()
-            guard domain == host || host.hasSuffix("." + domain) else { continue }
-            group.enter()
-            store.setCookie(cookie) { group.leave() }
-        }
-        group.notify(queue: .main, execute: completion)
-    }
-}
-
 private struct ComicResult: Identifiable {
     let id: String
     let title: String
@@ -125,6 +79,7 @@ final class OnlineMainView: NSView, WKNavigationDelegate, WKScriptMessageHandler
     private var siteRoute = ComicSiteRoute.selected
     private var rootURL: URL { siteRoute.rootURL }
     private let engine: WKWebView
+    private var engineNavigation: WKNavigation?
     private let scriptHandler = WeakComicScriptHandler()
     private let titleLabel = NSTextField(labelWithString: "墨夜阅读器")
     private let searchField = MoyeCenteredTextField()
@@ -138,7 +93,7 @@ final class OnlineMainView: NSView, WKNavigationDelegate, WKScriptMessageHandler
     private let chooseDownloadFolderButton: NSButton
     private let openDownloadFolderButton: NSButton
     private let searchButton: NSButton
-    private let loginButton: NSButton
+    private let siteRoutePopup = NSPopUpButton(frame: .zero, pullsDown: false)
     private let themeButton: NSButton
     private let statusLabel = NSTextField(labelWithString: "输入作品名、作者名或 JM 车号开始搜索")
     private let resultCountLabel = NSTextField(labelWithString: "漫画作品")
@@ -171,16 +126,6 @@ final class OnlineMainView: NSView, WKNavigationDelegate, WKScriptMessageHandler
     private var selectedDetail: ComicDetail?
     private var autoReadAlbumID: String?
     private var selectedPageSet: ComicPageSet?
-    private var loginPanel: NativeLoginPanel?
-    private var accountPanel: MoyeAccountPanel?
-    private var authenticatedUsername: String?
-    private var loginAttemptID = UUID()
-    private var loginDeadline: Date?
-    private var loginEngine: WKWebView?
-    private var loginPending: LoginRequest = .idle
-    private var sessionVerifier: WKWebView?
-    private var sessionVerificationID = UUID()
-    private var sessionVerificationTimeout: DispatchWorkItem?
     private var downloadNavigationID = UUID()
     private var resetScrollToTop = false
     private var columns = UserDefaults.standard.integer(forKey: "MoyeShelf.ComicColumns")
@@ -211,12 +156,6 @@ final class OnlineMainView: NSView, WKNavigationDelegate, WKScriptMessageHandler
         case photo(ComicChapter, ComicResult)
     }
 
-    private enum LoginRequest {
-        case idle
-        case page(String, String)
-        case outcome(String)
-    }
-
     init(frame: NSRect, owner: MoyeWindowController, initialQuery: String? = nil) {
         self.owner = owner
         if columns == 0 { columns = 2 }
@@ -226,7 +165,6 @@ final class OnlineMainView: NSView, WKNavigationDelegate, WKScriptMessageHandler
         clearSearchButton = iconButton("", symbolName: "xmark", target: nil, action: #selector(clearSearch(_:)), identifier: "comic-search-clear")
         chooseDownloadFolderButton = iconButton("更改位置", symbolName: "folder.badge.gearshape", target: nil, action: #selector(chooseDownloadFolder(_:)), identifier: "download-location-change")
         openDownloadFolderButton = iconButton("打开文件夹", symbolName: "folder", target: nil, action: #selector(openDownloadFolder(_:)), identifier: "download-location-open")
-        loginButton = iconButton("登录账号", symbolName: "person.crop.circle", target: nil, action: #selector(showLogin(_:)))
         themeButton = iconButton(MoyeAppearance.isDark ? "深色模式" : "浅色模式", symbolName: MoyeAppearance.isDark ? "moon.stars.fill" : "sun.max.fill", target: nil, action: #selector(toggleTheme(_:)))
         themeButton.toolTip = "当前为" + (MoyeAppearance.isDark ? "深色模式" : "浅色模式") + "，点击切换"
         backButton = iconButton("返回结果", symbolName: "chevron.left", target: nil, action: #selector(goBack(_:)))
@@ -264,7 +202,13 @@ final class OnlineMainView: NSView, WKNavigationDelegate, WKScriptMessageHandler
         titleLabel.textColor = color(0.16, 0.16, 0.20)
         headerCard.addSubview(titleLabel)
 
-        loginButton.target = self
+        siteRoutePopup.addItems(withTitles: ComicSiteRoute.allCases.map(\.displayTitle))
+        siteRoutePopup.selectItem(at: ComicSiteRoute.allCases.firstIndex(of: siteRoute) ?? 0)
+        siteRoutePopup.target = self
+        siteRoutePopup.action = #selector(changeSiteRoute(_:))
+        siteRoutePopup.identifier = NSUserInterfaceItemIdentifier("site-route-select")
+        siteRoutePopup.setAccessibilityLabel("站点线路")
+        siteRoutePopup.toolTip = "切换搜索、阅读和下载使用的站点线路"
         themeButton.target = self
         searchButton.target = self
         clearSearchButton.target = self
@@ -277,9 +221,9 @@ final class OnlineMainView: NSView, WKNavigationDelegate, WKScriptMessageHandler
         monthRangeCard.onCancel = { [weak self] in self?.cancelMonthRanking() }
         addSubview(monthRangeCard)
         for button in rankingButtons { button.target = self; button.font = .systemFont(ofSize: 14, weight: .semibold); addSubview(button) }
-        loginButton.font = .systemFont(ofSize: 15, weight: .semibold)
+        siteRoutePopup.font = .systemFont(ofSize: 14, weight: .medium)
         themeButton.font = .systemFont(ofSize: 14, weight: .semibold)
-        headerCard.addSubview(loginButton)
+        headerCard.addSubview(siteRoutePopup)
         headerCard.addSubview(themeButton)
 
         searchField.isBordered = false
@@ -374,7 +318,6 @@ final class OnlineMainView: NSView, WKNavigationDelegate, WKScriptMessageHandler
         showResultsState()
         searchField.stringValue = initialQuery ?? ""
         clearSearchButton.isHidden = searchField.stringValue.isEmpty
-        restoreSiteSession()
 #if MOYE_DIAGNOSTICS
         pollVerification()
 #endif
@@ -394,11 +337,8 @@ final class OnlineMainView: NSView, WKNavigationDelegate, WKScriptMessageHandler
         pending = .idle
         listingGeneration = UUID()
         downloadNavigationID = UUID()
+        engineNavigation = nil
         engine.stopLoading()
-        endLoginRequest()
-        endSessionVerification()
-        loginPanel?.dismiss()
-        accountPanel?.dismiss()
         readerView?.removeFromSuperview()
         readerView = nil
         selectedPageSet = nil
@@ -433,13 +373,13 @@ final class OnlineMainView: NSView, WKNavigationDelegate, WKScriptMessageHandler
 
     static func webConfiguration() -> WKWebViewConfiguration {
         let configuration = WKWebViewConfiguration()
-        configuration.websiteDataStore = .default()
+        configuration.websiteDataStore = MoyeRuntimeData.websiteDataStore
         let controller = WKUserContentController()
         let css = """
         .adsbygoogle, [id*='ad-container' i], [class*='advertisement' i], [class*='ad-banner' i], iframe[src*='doubleclick' i], iframe[src*='adservice' i], .popunder, .popup-ad { display:none !important; visibility:hidden !important; }
         """
         let script = """
-        (()=>{const css=\(String(reflecting: css));const install=()=>{const root=document.documentElement;if(!root)return false;if(!document.getElementById('moye-clean-view')){const s=document.createElement('style');s.id='moye-clean-view';s.textContent=css;(document.head||root).appendChild(s)}return true};if(!install()){const wait=new MutationObserver(()=>{if(install())wait.disconnect()});wait.observe(document,{childList:true,subtree:true})}else{new MutationObserver(install).observe(document.documentElement,{childList:true,subtree:true})}window.alert=(message)=>{try{window.webkit.messageHandlers.moyeLoginAlert.postMessage(String(message||''))}catch(_){}};window.open=()=>null;})();
+        (()=>{const css=\(String(reflecting: css));const install=()=>{const root=document.documentElement;if(!root)return false;if(!document.getElementById('moye-clean-view')){const s=document.createElement('style');s.id='moye-clean-view';s.textContent=css;(document.head||root).appendChild(s)}return true};if(!install()){const wait=new MutationObserver(()=>{if(install())wait.disconnect()});wait.observe(document,{childList:true,subtree:true})}else{new MutationObserver(install).observe(document.documentElement,{childList:true,subtree:true})}window.alert=()=>{};window.open=()=>null;})();
         """
         controller.addUserScript(WKUserScript(source: script, injectionTime: .atDocumentStart, forMainFrameOnly: false))
         let searchNotifier = """
@@ -493,8 +433,8 @@ final class OnlineMainView: NSView, WKNavigationDelegate, WKScriptMessageHandler
         collapseButton.title = compact ? "显示搜索与筛选" : (functionsCollapsed ? "展开筛选" : "收起筛选")
         headerCard.frame = NSRect(x: left, y: bounds.height - 100, width: contentWidth, height: 76)
         titleLabel.frame = NSRect(x: 24, y: 20, width: 340, height: 38)
-        loginButton.frame = NSRect(x: contentWidth - 166, y: 16, width: 146, height: 44)
-        themeButton.frame = NSRect(x: contentWidth - 324, y: 16, width: 146, height: 44)
+        siteRoutePopup.frame = NSRect(x: contentWidth - 454, y: 20, width: 276, height: 36)
+        themeButton.frame = NSRect(x: contentWidth - 166, y: 16, width: 146, height: 44)
         searchPanel.frame = NSRect(x: left, y: bounds.height - 192, width: contentWidth, height: 74)
         searchIcon.frame = NSRect(x: 23, y: 25, width: 24, height: 24)
         searchButton.frame = NSRect(x: contentWidth - 126, y: 12, width: 112, height: 50)
@@ -628,7 +568,7 @@ final class OnlineMainView: NSView, WKNavigationDelegate, WKScriptMessageHandler
         pending = .search(query)
         statusLabel.stringValue = "正在搜索“\(query)” · 第 \(page) 页…"
         showResultsState()
-        engine.load(URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 35))
+        engineNavigation = engine.load(URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 35))
     }
 
     @objc private func chooseRanking(_ sender: NSButton) {
@@ -671,7 +611,7 @@ final class OnlineMainView: NSView, WKNavigationDelegate, WKScriptMessageHandler
         setSearchBusy(true)
         statusLabel.stringValue = "正在载入" + rankingTitle + " · 按" + orderTitle + "排序…"
         showResultsState()
-        engine.load(URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 35))
+        engineNavigation = engine.load(URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 35))
     }
 
     private func updateRankingButtons() {
@@ -738,22 +678,6 @@ final class OnlineMainView: NSView, WKNavigationDelegate, WKScriptMessageHandler
             acceptDetail(message.body, result: result)
             return
         }
-        if message.name == "moyeSessionReady" {
-            guard message.frameInfo.isMainFrame, message.frameInfo.securityOrigin.host == rootURL.host,
-                  let verifier = sessionVerifier, message.webView === verifier,
-                  let response = message.body as? [String: Any] else { return }
-            let ok = response["ok"] as? Bool == true
-            moyeDiagnostic("session.document.ready.confirmed=\(ok),userPage=\(response["userPage"] as? Bool ?? false),account=\(response["account"] as? Bool ?? false),loginForm=\(response["hasLoginForm"] as? Bool ?? false)")
-            if ok { confirmRestoredSession(verifier) }
-            else if response["hasLoginForm"] as? Bool == true { expireRestoredSession() }
-            return
-        }
-        if message.name == "moyeLoginDocumentReady" {
-            guard message.frameInfo.isMainFrame, message.frameInfo.securityOrigin.host == rootURL.host,
-                  message.webView === loginEngine else { return }
-            loginDocumentReady()
-            return
-        }
         if message.name == "moyePhoto" {
             guard message.frameInfo.isMainFrame, message.frameInfo.securityOrigin.host == rootURL.host,
                   message.webView === engine, case .photo(let chapter, _) = pending,
@@ -772,12 +696,8 @@ final class OnlineMainView: NSView, WKNavigationDelegate, WKScriptMessageHandler
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-        if webView === sessionVerifier {
-            verifyRestoredSession(webView)
-            return
-        }
-        if webView === loginEngine { loginDocumentReady(); return }
-        guard webView === engine else { return }
+        // A previous page can finish after its script has already started the next page.
+        guard webView === engine, let expected = engineNavigation, navigation === expected else { return }
         switch pending {
         case .search:
             guard listingMatches(webView.url) else { return }
@@ -842,8 +762,11 @@ final class OnlineMainView: NSView, WKNavigationDelegate, WKScriptMessageHandler
         showDetailState(detail)
         if autoReadAlbumID == result.id {
             autoReadAlbumID = nil
-            if let chapter = detail.chapters.first { loadChapter(chapter) }
-            else { statusLabel.stringValue = "这部作品暂时没有可阅读的章节。" }
+            if detail.chapters.count == 1, let chapter = detail.chapters.first {
+                loadChapter(chapter)
+            } else if detail.chapters.isEmpty {
+                statusLabel.stringValue = "这部作品暂时没有可阅读的章节。"
+            }
         }
     }
 
@@ -939,7 +862,7 @@ final class OnlineMainView: NSView, WKNavigationDelegate, WKScriptMessageHandler
         monthRangeCard.setBusy(true)
         setSearchBusy(true)
         statusLabel.stringValue = "正在载入 \(monthRangeCard.rangeTitle) · 核对上架月份与爱心数…"
-        engine.load(URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 35))
+        engineNavigation = engine.load(URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 35))
     }
 
     private func beginMonthScan() {
@@ -1092,32 +1015,15 @@ final class OnlineMainView: NSView, WKNavigationDelegate, WKScriptMessageHandler
     """
 
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
-        if webView === sessionVerifier { endSessionVerification() }
-        else if webView === loginEngine {
-            if (error as NSError).code != NSURLErrorCancelled { loginFailed(loginConnectionMessage(error)) }
-        } else if webView === engine { navigationFailed(error) }
+        if webView === engine, navigation === engineNavigation { navigationFailed(error) }
     }
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
-        if webView === sessionVerifier { endSessionVerification() }
-        else if webView === loginEngine {
-            if (error as NSError).code != NSURLErrorCancelled { loginFailed(loginConnectionMessage(error)) }
-        } else if webView === engine { navigationFailed(error) }
+        if webView === engine, navigation === engineNavigation { navigationFailed(error) }
     }
 
     func webView(_ webView: WKWebView, decidePolicyFor navigationResponse: WKNavigationResponse, decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void) {
         if navigationResponse.isForMainFrame, let response = navigationResponse.response as? HTTPURLResponse {
             moyeDiagnostic("navigation.http=\(response.statusCode),path=\(response.url?.path ?? "")")
-            if response.statusCode >= 400 {
-                if webView === loginEngine {
-                    decisionHandler(.cancel)
-                    loginFailed("\(rootURL.host ?? "站点") 返回 HTTP \(response.statusCode)；登录服务暂时不可用。")
-                    return
-                } else if webView === sessionVerifier {
-                    decisionHandler(.cancel)
-                    endSessionVerification()
-                    return
-                }
-            }
         }
         decisionHandler(.allow)
     }
@@ -1125,21 +1031,6 @@ final class OnlineMainView: NSView, WKNavigationDelegate, WKScriptMessageHandler
     private func navigationFailed(_ error: Error) {
         if (error as NSError).code == NSURLErrorCancelled { return }
         showNetworkError(error)
-    }
-
-    private func loginConnectionMessage(_ error: Error) -> String {
-        let networkError = error as NSError
-        let host = (networkError.userInfo[NSURLErrorFailingURLErrorKey] as? URL)?.host ?? rootURL.host ?? "禁漫天堂"
-        let reason: String
-        switch networkError.code {
-        case NSURLErrorNotConnectedToInternet: reason = "当前没有网络连接"
-        case NSURLErrorCannotFindHost: reason = "找不到站点域名，请检查入口或 DNS"
-        case NSURLErrorCannotConnectToHost: reason = "站点拒绝连接或当前线路不可达"
-        case NSURLErrorTimedOut: reason = "连接超时，当前线路可能不可用"
-        case NSURLErrorSecureConnectionFailed, NSURLErrorServerCertificateUntrusted: reason = "安全连接失败，请检查网络或站点证书"
-        default: reason = networkError.localizedDescription
-        }
-        return "无法连接 \(host)（\(networkError.code)）：\(reason)"
     }
 
     private func showNetworkError(_ error: Error) {
@@ -1161,7 +1052,7 @@ final class OnlineMainView: NSView, WKNavigationDelegate, WKScriptMessageHandler
         autoReadAlbumID = startReading ? result.id : nil
         pending = .detail(result)
         statusLabel.stringValue = "正在读取作品信息与章节…"
-        engine.load(URLRequest(url: result.url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 35))
+        engineNavigation = engine.load(URLRequest(url: result.url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 35))
         DispatchQueue.main.asyncAfter(deadline: .now() + 40) { [weak self] in
             guard let self, case .detail(let current) = self.pending, current.id == result.id else { return }
             self.pending = .idle
@@ -1206,7 +1097,9 @@ final class OnlineMainView: NSView, WKNavigationDelegate, WKScriptMessageHandler
         columnsLabel.isHidden = true
         for button in columnButtons { button.isHidden = true }
         resultCountLabel.stringValue = "作品详情"
-        statusLabel.stringValue = "作品信息已载入 · \(detail.chapters.count) 个章节"
+        statusLabel.stringValue = detail.chapters.count > 1
+            ? "请选择要阅读的章节 · 共 \(detail.chapters.count) 话"
+            : "作品信息已载入 · \(detail.chapters.count) 个章节"
         autoCompact = false
         resetScrollToTop = true
         needsLayout = true
@@ -1222,7 +1115,7 @@ final class OnlineMainView: NSView, WKNavigationDelegate, WKScriptMessageHandler
         pending = .photo(chapter, result)
         readerView?.showChapterLoading(chapter.title)
         statusLabel.stringValue = "正在打开《\(chapter.title)》…"
-        engine.load(URLRequest(url: chapter.url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 35))
+        engineNavigation = engine.load(URLRequest(url: chapter.url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 35))
         let run = chapterNavigationID
         DispatchQueue.main.asyncAfter(deadline: .now() + 40) { [weak self] in
             guard let self, self.chapterNavigationID == run, case .photo(let current, _) = self.pending, current.id == chapter.id else { return }
@@ -1264,9 +1157,6 @@ final class OnlineMainView: NSView, WKNavigationDelegate, WKScriptMessageHandler
             }
         }
         reader.updateDownloadStatus(downloadPanel?.isRunning == true)
-        // Start with the visible spread, then fetch every remaining page and chapter.
-        for index in pageSet.urls.indices { Self.cachePage(pageSet, index: index, chapter: chapter, priority: false) }
-        preloadBook(excluding: chapter)
         readerView = reader
         for view in [background, searchPanel, downloadLocationCard, statusLabel, resultCountLabel, columnsLabel, scrollView, backButton, downloadButton] { view.isHidden = true }
         columnButtons.forEach { $0.isHidden = true }
@@ -1276,6 +1166,9 @@ final class OnlineMainView: NSView, WKNavigationDelegate, WKScriptMessageHandler
         reader.frame = bounds
         reader.autoresizingMask = [.width, .height]
         addSubview(reader)
+        // Start the visible pages before any adjacent-chapter preview requests.
+        reader.layoutSubtreeIfNeeded()
+        preloadAdjacentChapters(to: chapter)
         window?.makeFirstResponder(reader)
         needsLayout = true
     }
@@ -1289,18 +1182,21 @@ final class OnlineMainView: NSView, WKNavigationDelegate, WKScriptMessageHandler
             }
         }, completion: completion)
     }
-    private func preloadBook(excluding current: ComicChapter) {
-        guard let detail = selectedDetail else { return }
+    private func preloadAdjacentChapters(to current: ComicChapter) {
+        guard let detail = selectedDetail,
+              let currentIndex = detail.chapters.firstIndex(where: { $0.id == current.id || $0.url == current.url }) else { return }
         if bookLoader == nil { bookLoader = MoyeChapterLoader(parent: self) }
-        for chapter in detail.chapters where chapter.url != current.url {
+        let neighbors = [currentIndex + 1, currentIndex - 1].filter { detail.chapters.indices.contains($0) }
+        for neighbor in neighbors {
+            let chapter = detail.chapters[neighbor]
             if let pages = MoyeReadingCache.shared.chapters[chapter.url.absoluteString] {
-                for index in pages.urls.indices { Self.cachePage(pages, index: index, chapter: chapter, priority: false) }
+                for index in pages.urls.indices.prefix(2) { Self.cachePage(pages, index: index, chapter: chapter, priority: false) }
             } else if MoyeReadingCache.shared.requestedChapters.insert(chapter.url.absoluteString).inserted {
                 bookLoader?.load(chapter) { pages in
                     MoyeReadingCache.shared.requestedChapters.remove(chapter.url.absoluteString)
                     guard let pages else { return }
                     MoyeReadingCache.shared.chapters[chapter.url.absoluteString] = pages
-                    for index in pages.urls.indices { Self.cachePage(pages, index: index, chapter: chapter, priority: false) }
+                    for index in pages.urls.indices.prefix(2) { Self.cachePage(pages, index: index, chapter: chapter, priority: false) }
                 }
             }
         }
@@ -1350,354 +1246,30 @@ final class OnlineMainView: NSView, WKNavigationDelegate, WKScriptMessageHandler
 
     @objc private func toggleTheme(_ sender: Any?) { owner?.toggleAppearance(from: self) }
 
-    @objc private func showLogin(_ sender: Any?) {
-        if let username = authenticatedUsername { showAccount(username: username) }
-        else { showLoginForm() }
-    }
-
-    private func showAccount(username: String) {
-        let panel = MoyeAccountPanel(username: username, site: siteRoute.rawValue) { [weak self] in self?.showLoginForm() }
-        accountPanel = panel
-        panel.show()
-    }
-
-    private func showLoginForm() {
-        endSessionVerification()
-        if let loginPanel { loginPanel.show(); return }
-        let panel = NativeLoginPanel(initialRoute: siteRoute, onRouteChange: { [weak self] route in
-            self?.setSiteRoute(route)
-        }, onSubmit: { [weak self] username, password, route in
-            self?.setSiteRoute(route)
-            self?.beginSiteLogin(username: username, password: password)
-        }, onClose: { [weak self] in
-            self?.endLoginRequest()
-            self?.loginPanel = nil
-        })
-        loginPanel = panel
-        panel.show()
-    }
-
-    private func setSiteRoute(_ route: ComicSiteRoute) {
+    @objc private func changeSiteRoute(_ sender: NSPopUpButton) {
+        let index = sender.indexOfSelectedItem
+        guard ComicSiteRoute.allCases.indices.contains(index) else { return }
+        let route = ComicSiteRoute.allCases[index]
         guard siteRoute != route else { return }
-        endLoginRequest()
-        endSessionVerification()
-        authenticatedUsername = nil
-        loginButton.title = "登录账号"
-        loginButton.toolTip = "登录你自己的账号"
+        cancelMonthRanking()
+        engine.stopLoading()
+        pending = .idle
+        listingGeneration = UUID()
         siteRoute = route
         UserDefaults.standard.set(route.rawValue, forKey: ComicSiteRoute.preferenceKey)
-        statusLabel.stringValue = "站点线路已切换为 \(route.rawValue)；后续搜索和登录会使用此线路。"
-    }
-
-    private func beginSiteLogin(username: String, password: String) {
-        endLoginRequest()
-        endSessionVerification()
-        let cleanUsername = username.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !cleanUsername.isEmpty, !password.isEmpty else {
-            loginPanel?.showFailure("请输入账号和密码。")
-            return
-        }
-        loginPanel?.showSubmitting()
-        loginButton.title = "登录中…"
-        loginButton.isEnabled = false
-        statusLabel.stringValue = "正在通过禁漫天堂验证账号…"
-        loginAttemptID = UUID()
-        let attemptID = loginAttemptID
-        loginDeadline = Date().addingTimeInterval(40)
-        moyeDiagnostic("login.begin")
-        loginPending = .page(cleanUsername, password)
-        let configuration = Self.webConfiguration()
-        for name in ["moyeLoginDocumentReady"] {
-            configuration.userContentController.add(scriptHandler, name: name)
-        }
-        let ready = "try{window.webkit.messageHandlers.moyeLoginDocumentReady.postMessage({ready:true})}catch(_){}"
-        configuration.userContentController.addUserScript(WKUserScript(source: ready, injectionTime: .atDocumentEnd, forMainFrameOnly: true))
-        let worker = WKWebView(frame: NSRect(x: -4000, y: -4000, width: 1440, height: 1100), configuration: configuration)
-        worker.customUserAgent = engine.customUserAgent
-        worker.navigationDelegate = self
-        worker.isHidden = true
-        worker.setAccessibilityHidden(true)
-        loginEngine = worker
-        addSubview(worker, positioned: .below, relativeTo: background)
-        worker.load(URLRequest(url: rootURL.appendingPathComponent("login"), cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 25))
-        DispatchQueue.main.asyncAfter(deadline: .now() + 40) { [weak self] in
-            guard let self, self.loginAttemptID == attemptID else { return }
-            switch self.loginPending {
-            case .page, .outcome:
-                self.loginFailed("当前线路连接超时，站点没有返回可确认的登录结果。请稍后再试。")
-            default: break
-            }
-        }
-    }
-
-    private func loginDocumentReady() {
-        switch loginPending {
-        case .page(let username, let password): submitSiteLogin(username: username, password: password)
-        case .outcome: break
-        case .idle: break
-        }
-    }
-
-    private func endLoginRequest() {
-        loginAttemptID = UUID()
-        loginPending = .idle
-        loginDeadline = nil
-        loginEngine?.navigationDelegate = nil
-        for name in ["moyeLoginDocumentReady"] {
-            loginEngine?.configuration.userContentController.removeScriptMessageHandler(forName: name)
-        }
-        loginEngine?.evaluateJavaScript("window.__moyeLoginAbort?.abort()", completionHandler: nil)
-        loginEngine?.stopLoading()
-        loginEngine?.removeFromSuperview()
-        loginEngine = nil
-        loginButton.title = authenticatedUsername == nil ? "登录账号" : "账号已登录"
-        loginButton.isEnabled = true
-    }
-
-    private func submitSiteLogin(username: String, password: String) {
-        guard let worker = loginEngine else { return }
-        let attempt = loginAttemptID
-        let source = """
-        try {
-          if (location.hostname !== expectedHost) return {ok:false, reason:'登录页面跳转到了其他域名，账号信息未提交。'};
-          const pageText = document.body?.innerText || '';
-          if (/520|web server is returning an unknown error|origin web server/i.test((document.title || '') + ' ' + pageText)) {
-            return {ok:false, reason:'站点服务器返回 Cloudflare 520 错误；登录页面没有加载，账号信息未提交。'};
-          }
-          const visible = e => !!e && e.getClientRects().length > 0 && getComputedStyle(e).display !== 'none' && getComputedStyle(e).visibility !== 'hidden';
-          const pw = [...document.querySelectorAll('form[name=login_form] input[type=password],input[type=password]')].find(visible);
-          if (!pw) return {ok:false, reason:'没有找到站点登录表单'};
-          const form = pw.form || pw.closest('form');
-          if (!form) return {ok:false, reason:'站点登录表单结构暂不兼容'};
-          const fields = [...form.querySelectorAll('input')].filter(e => e !== pw && visible(e) && !['hidden','submit','button','image'].includes((e.type || '').toLowerCase()));
-          const userInput = fields.find(e => /user|email|account|login|name/i.test((e.name || '') + ' ' + (e.id || '') + ' ' + (e.placeholder || '')))
-            || fields.find(e => ['text','email',''].includes((e.type || '').toLowerCase()));
-          if (!userInput) return {ok:false, reason:'没有找到账号输入框'};
-          const setValue = (element, value) => {
-            const descriptor = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value');
-            if (descriptor && descriptor.set) descriptor.set.call(element, value); else element.value = value;
-            element.dispatchEvent(new Event('input', {bubbles:true}));
-            element.dispatchEvent(new Event('change', {bubbles:true}));
-          };
-          setValue(userInput, user);
-          setValue(pw, pass);
-          // JM's current web form uses a type="button" AJAX control, not a native submit button.
-          // Keep its long-lived session option enabled, but never enable its password-save option.
-          const persistentSession = form.querySelector('input[name=login_remember]');
-          if (persistentSession && !persistentSession.checked) {
-            persistentSession.checked = true;
-            persistentSession.dispatchEvent(new Event('change', {bubbles:true}));
-          }
-          const savePassword = form.querySelector('input[name=id_remember]');
-          if (savePassword) savePassword.checked = false;
-          const action = new URL(form.getAttribute('action') || '/login', location.href);
-          if (action.protocol !== 'https:' || action.hostname !== expectedHost || action.pathname !== '/login') {
-            return {ok:false, reason:'登录地址不属于当前站点，账号信息未提交。'};
-          }
-          // Use the site's own form fields and submit_login marker. This avoids
-          // depending on its deferred jQuery button handler or advertisement loads.
-          const body = new URLSearchParams(new FormData(form));
-          body.set('submit_login', '1');
-          const controller = new AbortController();
-          window.__moyeLoginAbort = controller;
-          const timeout = setTimeout(() => controller.abort(), 20000);
-          let response;
-          try {
-            response = await fetch(action.href, {
-              method:'POST', credentials:'same-origin', signal:controller.signal,
-              headers:{'Content-Type':'application/x-www-form-urlencoded; charset=UTF-8','X-Requested-With':'XMLHttpRequest'},
-              body:body.toString()
-            });
-            const text = await response.text();
-            let data;
-            try { data = JSON.parse(text); } catch (_) {
-              return {ok:false, reason:'登录服务没有返回有效结果（HTTP ' + response.status + '），请稍后重试。'};
-            }
-            let message = String(data?.errors || data?.msg || data?.message || '');
-            if (pass) message = message.split(pass).join('[已隐藏]');
-            return {ok:true,httpStatus:response.status,status:Number(data?.status ?? -1),message};
-          } finally { clearTimeout(timeout); if (window.__moyeLoginAbort === controller) delete window.__moyeLoginAbort; }
-        } catch (error) {
-          return {ok:false, reason:error.name === 'AbortError' ? '登录服务响应超时，请重试。' : '登录请求失败，请检查网络后重试。'};
-        }
-        """
-        moyeDiagnostic("login.form.submit")
-        loginPending = .outcome(username)
-        worker.callAsyncJavaScript(source, arguments: ["user": username, "pass": password, "expectedHost": rootURL.host ?? ""], in: nil, in: .page, completionHandler: { [weak self, weak worker] result in
-            DispatchQueue.main.async {
-                guard let self, let worker, self.loginEngine === worker,
-                      self.loginAttemptID == attempt, case .outcome = self.loginPending else { return }
-                guard case .success(let value) = result else {
-                    if case .failure(let error) = result {
-                        let details = (error as NSError).userInfo.first(where: { $0.key.localizedCaseInsensitiveContains("exceptionmessage") })?.value as? String
-                        self.loginFailed("登录表单提交失败：\(details ?? error.localizedDescription)")
-                    }
-                    return
-                }
-                let response = value as? [String: Any] ?? [:]
-                guard response["ok"] as? Bool == true else {
-                    self.loginFailed(response["reason"] as? String ?? "没有找到可用的站点登录表单。")
-                    return
-                }
-                self.loginPanel?.clearPassword()
-                let httpStatus = response["httpStatus"] as? Int ?? 0
-                let status = response["status"] as? Int ?? -1
-                moyeDiagnostic("login.response.http=\(httpStatus),status=\(status)")
-                if status == 1, (200..<300).contains(httpStatus) {
-                    self.completeLoginWithSession(username: username)
-                } else if status == 5 {
-                    self.loginFailed("站点要求额外验证，登录尚未完成。")
-                } else {
-                    let detail = (response["message"] as? String ?? "").cleanedHTMLText
-                    self.loginFailed(detail.isEmpty ? "站点没有确认登录成功（HTTP \(httpStatus)，状态 \(status)）。" : "站点返回：\(detail)")
-                }
-            }
-        })
-    }
-
-    private func loginSucceeded(username: String) {
-        authenticatedUsername = username
-        endLoginRequest()
-        loginButton.title = "账号已登录"
-        loginButton.isEnabled = true
-        loginButton.toolTip = "查看当前登录账号"
-        statusLabel.stringValue = "账号已登录 · 阅读和下载会使用当前站点会话"
-        moyeDiagnostic("login.confirmed")
-        UserDefaults.standard.set(username, forKey: "MoyeShelf.SessionUser.\(siteRoute.rawValue)")
-        loginPanel?.dismiss()
-        loginPanel = nil
-        showAccount(username: username)
-    }
-
-    private func completeLoginWithSession(username: String) {
-        guard let worker = loginEngine else { return }
-        let attempt = loginAttemptID
-        worker.configuration.websiteDataStore.httpCookieStore.getAllCookies { [weak self, weak worker] cookies in
-            DispatchQueue.main.async {
-                guard let self, let worker, self.loginEngine === worker, self.loginAttemptID == attempt,
-                      case .outcome(let user) = self.loginPending, user == username else { return }
-                let hasSession = cookies.contains { Self.isAccountCookie($0, host: self.siteRoute.rawValue) }
-                moyeDiagnostic("login.session.cookie=\(hasSession)")
-                guard hasSession else { self.loginFailed("站点接受了登录请求，但没有建立登录会话，请重试。"); return }
-                ComicSessionStore.save(cookies, host: self.siteRoute.rawValue)
-                self.loginSucceeded(username: username)
-            }
-        }
-    }
-
-    private static func isAccountCookie(_ cookie: HTTPCookie, host: String) -> Bool {
-        let domain = cookie.domain.trimmingCharacters(in: CharacterSet(charactersIn: ".")).lowercased()
-        return cookie.name == "AVS" && !cookie.value.isEmpty
-            && (domain == host || host.hasSuffix("." + domain))
-            && (cookie.expiresDate.map { $0 > Date() } ?? true)
-    }
-
-    private func restoreSiteSession() {
-        let key = "MoyeShelf.SessionUser.\(siteRoute.rawValue)"
-        guard let expectedUsername = UserDefaults.standard.string(forKey: key),
-              !expectedUsername.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        endSessionVerification()
-        let run = UUID()
-        sessionVerificationID = run
-        let host = siteRoute.rawValue
-        let configuration = Self.webConfiguration()
-        // Restoration is optional background work. The sign-in entry remains usable.
-        loginButton.title = "登录账号"
-        loginButton.isEnabled = true
-        loginButton.toolTip = "正在检查已保存的登录；点击可重新登录"
-        let timeout = DispatchWorkItem { [weak self] in
-            guard let self, self.sessionVerificationID == run else { return }
-            self.endSessionVerification()
-        }
-        sessionVerificationTimeout = timeout
-        DispatchQueue.main.asyncAfter(deadline: .now() + 10, execute: timeout)
-        ComicSessionStore.restore(host: host, into: configuration.websiteDataStore.httpCookieStore) { [weak self] in
-            guard let self, self.sessionVerificationID == run, !self.closing else { return }
-            configuration.websiteDataStore.httpCookieStore.getAllCookies { [weak self] cookies in
-                DispatchQueue.main.async {
-                    guard let self, self.sessionVerificationID == run, !self.closing else { return }
-                    guard cookies.contains(where: { Self.isAccountCookie($0, host: host) }) else {
-                        UserDefaults.standard.removeObject(forKey: key)
-                        self.endSessionVerification()
-                        return
-                    }
-                    self.startSessionVerifier(configuration: configuration, username: expectedUsername)
-                }
-            }
-        }
-    }
-
-    private func startSessionVerifier(configuration: WKWebViewConfiguration, username: String) {
-        configuration.userContentController.add(scriptHandler, name: "moyeSessionReady")
-        let readyScript = """
-        (()=>{const expected=\(String(reflecting: username)).toLocaleLowerCase();let lastState='';const check=()=>{const links=[...document.querySelectorAll('a')];const logout=links.some(a=>/logout|signout|sign out|登出|注销|註銷|退出登入|退出登录/i.test((a.textContent||'')+' '+(a.getAttribute('href')||'')));const visible=e=>!!e&&e.getClientRects().length>0&&getComputedStyle(e).display!=='none'&&getComputedStyle(e).visibility!=='hidden';const hasLoginForm=[...document.querySelectorAll('form[name=login_form] input[type=password]')].some(visible);const userPage=/^\\/user(?:\\/|$)/i.test(location.pathname);const account=(document.body?.innerText||'').toLocaleLowerCase().includes(expected);const ok=!hasLoginForm&&(logout||(userPage&&account));const state=JSON.stringify({ok,userPage,account,hasLoginForm});if(state!==lastState){lastState=state;try{window.webkit.messageHandlers.moyeSessionReady.postMessage({ok,userPage,account,hasLoginForm})}catch(_){}}return ok||hasLoginForm};if(!check()){const observer=new MutationObserver(()=>{if(check())observer.disconnect()});observer.observe(document.documentElement,{childList:true,subtree:true});setTimeout(()=>observer.disconnect(),10000)}})();
-        """
-        configuration.userContentController.addUserScript(WKUserScript(source: readyScript, injectionTime: .atDocumentEnd, forMainFrameOnly: true))
-        let verifier = WKWebView(frame: NSRect(x: -4000, y: -4000, width: 1440, height: 1100), configuration: configuration)
-        verifier.customUserAgent = engine.customUserAgent
-        verifier.navigationDelegate = self
-        verifier.isHidden = true
-        verifier.setAccessibilityHidden(true)
-        sessionVerifier = verifier
-        addSubview(verifier, positioned: .below, relativeTo: background)
-        verifier.load(URLRequest(url: rootURL.appendingPathComponent("user/"), cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 8))
-    }
-
-    private func expireRestoredSession() {
-        UserDefaults.standard.removeObject(forKey: "MoyeShelf.SessionUser.\(siteRoute.rawValue)")
-        authenticatedUsername = nil
-        endSessionVerification()
-    }
-
-    private func verifyRestoredSession(_ verifier: WKWebView) {
-        let source = """
-        (()=>{const logout=[...document.querySelectorAll('a')].some(a=>/\\/logout(?:[/?#]|$)/i.test(a.getAttribute('href')||''));return {ok:logout};})()
-        """
-        verifier.evaluateJavaScript(source) { [weak self, weak verifier] value, _ in
-            DispatchQueue.main.async {
-                guard let self, let verifier, self.sessionVerifier === verifier else { return }
-                let ok = (value as? [String: Any])?["ok"] as? Bool == true
-                if ok {
-                    self.confirmRestoredSession(verifier)
-                } else { moyeDiagnostic("session.unconfirmed") }
-            }
-        }
-    }
-
-    private func confirmRestoredSession(_ verifier: WKWebView) {
-        guard sessionVerifier === verifier else { return }
-        endSessionVerification()
-        authenticatedUsername = UserDefaults.standard.string(forKey: "MoyeShelf.SessionUser.\(siteRoute.rawValue)")
-        loginButton.title = "账号已登录"
-        loginButton.isEnabled = true
-        if case .idle = pending { statusLabel.stringValue = "已保持登录 · 可以搜索、阅读和下载" }
-        loginButton.toolTip = "查看当前登录账号"
-        moyeDiagnostic("session.restored")
-    }
-
-    private func endSessionVerification() {
-        sessionVerificationID = UUID()
-        sessionVerificationTimeout?.cancel()
-        sessionVerificationTimeout = nil
-        sessionVerifier?.navigationDelegate = nil
-        sessionVerifier?.configuration.userContentController.removeScriptMessageHandler(forName: "moyeSessionReady")
-        sessionVerifier?.stopLoading()
-        sessionVerifier?.removeFromSuperview()
-        sessionVerifier = nil
-        if case .idle = loginPending {
-            loginButton.title = authenticatedUsername == nil ? "登录账号" : "账号已登录"
-            loginButton.isEnabled = true
-            loginButton.toolTip = authenticatedUsername == nil ? "登录你自己的账号" : "查看当前登录账号"
-        }
-    }
-
-    private func loginFailed(_ message: String) {
-        authenticatedUsername = nil
-        endLoginRequest()
-        statusLabel.stringValue = message
-        loginPanel?.clearPassword()
-        moyeDiagnostic("login.failed")
-        loginPanel?.showFailure(message)
+        currentPage = 1
+        currentResults.removeAll()
+        publicationDates.removeAll()
+        selectedResult = nil
+        selectedDetail = nil
+        detailCanvas = nil
+        canvas.setResults([], columns: columns)
+        resetScrollToTop = true
+        autoCompact = false
+        if searchField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            browsingRanking = true
+            loadRanking()
+        } else { search(nil) }
     }
 
     @objc private func downloadAlbum(_ sender: Any?) {
@@ -1769,7 +1341,7 @@ final class OnlineMainView: NSView, WKNavigationDelegate, WKScriptMessageHandler
         request.setValue("Mozilla/5.0 (Macintosh; Intel Mac OS X 15_0) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15", forHTTPHeaderField: "User-Agent")
         request.setValue("image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8", forHTTPHeaderField: "Accept")
         DispatchQueue.main.async {
-            WKWebsiteDataStore.default().httpCookieStore.getAllCookies { cookies in
+            MoyeRuntimeData.websiteDataStore.httpCookieStore.getAllCookies { cookies in
                 guard !handle.isCancelled else { completion(nil); return }
                 let host = url.host?.lowercased() ?? ""
                 let matching = cookies.filter { cookie in
@@ -1802,174 +1374,6 @@ final class OnlineMainView: NSView, WKNavigationDelegate, WKScriptMessageHandler
 
 private extension OnlineMainView {
     static let searchScriptPlaceholder = ""
-}
-
-private final class NativeLoginPanel: NSObject, NSWindowDelegate {
-    private let panel: NSPanel
-    private let usernameField = NSTextField()
-    private let passwordField = NSSecureTextField()
-    private let siteRouteLabel = NSTextField(labelWithString: "站点线路")
-    private let siteRoutePopup = NSPopUpButton(frame: .zero, pullsDown: false)
-    private let status = NSTextField(wrappingLabelWithString: "登录后会保持禁漫天堂的网站会话。墨夜阅读器不会保存你的密码。")
-    private let submitButton = MoyeGlassButton(title: "登录账号", target: nil, action: nil)
-    private let onRouteChange: (ComicSiteRoute) -> Void
-    private let onSubmit: (String, String, ComicSiteRoute) -> Void
-    private let onClose: () -> Void
-
-    init(initialRoute: ComicSiteRoute,
-         onRouteChange: @escaping (ComicSiteRoute) -> Void,
-         onSubmit: @escaping (String, String, ComicSiteRoute) -> Void,
-         onClose: @escaping () -> Void) {
-        self.onRouteChange = onRouteChange
-        self.onSubmit = onSubmit
-        self.onClose = onClose
-        panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 600, height: 520), styleMask: [.titled, .closable], backing: .buffered, defer: false)
-        super.init()
-        panel.delegate = self
-        panel.title = "登录禁漫天堂账号"
-        panel.appearance = MoyeAppearance.appearance
-        panel.backgroundColor = color(0.95, 0.95, 0.98)
-        panel.isReleasedWhenClosed = false
-        panel.center()
-
-        let content = NSView(frame: panel.contentView?.bounds ?? .zero)
-        content.autoresizingMask = [.width, .height]
-        content.wantsLayer = true
-        content.layer?.backgroundColor = color(0.95, 0.95, 0.98).cgColor
-        panel.contentView = content
-
-        siteRouteLabel.frame = NSRect(x: 38, y: 384, width: 95, height: 22)
-        siteRouteLabel.font = .systemFont(ofSize: 14, weight: .semibold)
-        siteRouteLabel.textColor = color(0.31, 0.31, 0.37)
-        content.addSubview(siteRouteLabel)
-        siteRoutePopup.addItems(withTitles: ComicSiteRoute.allCases.map(\.displayTitle))
-        siteRoutePopup.selectItem(at: ComicSiteRoute.allCases.firstIndex(of: initialRoute) ?? 0)
-        siteRoutePopup.frame = NSRect(x: 139, y: 378, width: 425, height: 34)
-        siteRoutePopup.target = self
-        siteRoutePopup.action = #selector(routeChanged(_:))
-        content.addSubview(siteRoutePopup)
-
-        let title = label("登录账号", size: 28, weight: .bold, color: color(0.16, 0.15, 0.21))
-        title.frame = NSRect(x: 34, y: 465, width: 520, height: 38)
-        content.addSubview(title)
-        let subtitle = label("公开作品可直接下载；登录用于账号访问权限。", size: 16, weight: .medium, color: color(0.40, 0.40, 0.47))
-        subtitle.frame = NSRect(x: 36, y: 435, width: 520, height: 24)
-        content.addSubview(subtitle)
-
-        let usernameCaption = label("用户名或邮箱", size: 14, weight: .semibold, color: color(0.31, 0.31, 0.37))
-        usernameCaption.frame = NSRect(x: 38, y: 333, width: 500, height: 22)
-        content.addSubview(usernameCaption)
-        usernameField.frame = NSRect(x: 36, y: 286, width: 528, height: 43)
-        usernameField.placeholderString = "输入禁漫天堂账号"
-        usernameField.stringValue = ""
-        usernameField.identifier = NSUserInterfaceItemIdentifier("login-username")
-        usernameField.font = .systemFont(ofSize: 17)
-        usernameField.focusRingType = .default
-        usernameField.wantsLayer = true
-        usernameField.layer?.cornerRadius = 11
-        usernameField.layer?.backgroundColor = surfaceTint(1).cgColor
-        usernameField.layer?.borderWidth = 1
-        usernameField.layer?.borderColor = color(0.82, 0.82, 0.87).cgColor
-        content.addSubview(usernameField)
-
-        let passwordCaption = label("密码", size: 14, weight: .semibold, color: color(0.31, 0.31, 0.37))
-        passwordCaption.frame = NSRect(x: 38, y: 253, width: 500, height: 22)
-        content.addSubview(passwordCaption)
-        passwordField.frame = NSRect(x: 36, y: 206, width: 528, height: 43)
-        passwordField.placeholderString = "输入密码"
-        passwordField.identifier = NSUserInterfaceItemIdentifier("login-password")
-        passwordField.font = .systemFont(ofSize: 17)
-        passwordField.focusRingType = .default
-        passwordField.wantsLayer = true
-        passwordField.layer?.cornerRadius = 11
-        passwordField.layer?.backgroundColor = surfaceTint(1).cgColor
-        passwordField.layer?.borderWidth = 1
-        passwordField.layer?.borderColor = color(0.82, 0.82, 0.87).cgColor
-        content.addSubview(passwordField)
-
-        status.frame = NSRect(x: 38, y: 129, width: 520, height: 48)
-        status.font = .systemFont(ofSize: 14, weight: .medium)
-        status.textColor = color(0.39, 0.39, 0.46)
-        status.maximumNumberOfLines = 3
-        content.addSubview(status)
-
-        submitButton.target = self
-        submitButton.action = #selector(submit(_:))
-        submitButton.bezelStyle = .rounded
-        submitButton.font = .systemFont(ofSize: 16, weight: .semibold)
-        submitButton.frame = NSRect(x: 36, y: 46, width: 528, height: 50)
-        submitButton.wantsLayer = true
-        submitButton.layer?.cornerRadius = 14
-        submitButton.layer?.backgroundColor = color(0.39, 0.30, 0.57).cgColor
-        submitButton.contentTintColor = .white
-        content.addSubview(submitButton)
-        passwordField.target = self
-        passwordField.action = #selector(submit(_:))
-    }
-
-    func show() {
-        panel.center()
-        panel.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
-        panel.makeFirstResponder(passwordField.stringValue.isEmpty ? usernameField : passwordField)
-    }
-
-    func dismiss() { clearPassword(); panel.orderOut(nil) }
-
-    func windowWillClose(_ notification: Notification) {
-        clearPassword()
-        onClose()
-    }
-
-    func clearPassword() { passwordField.stringValue = "" }
-
-    func showSubmitting(message: String = "正在安全提交账号信息…") {
-        status.stringValue = message
-        status.textColor = color(0.36, 0.33, 0.45)
-        submitButton.title = "正在登录…"
-        submitButton.isEnabled = false
-        usernameField.isEnabled = false
-        passwordField.isEnabled = false
-        siteRoutePopup.isEnabled = false
-    }
-
-    func showFailure(_ message: String) {
-        status.stringValue = message
-        status.textColor = color(0.68, 0.19, 0.20)
-        submitButton.title = "重试登录"
-        submitButton.isEnabled = true
-        usernameField.isEnabled = true
-        passwordField.isEnabled = true
-        siteRoutePopup.isEnabled = true
-    }
-
-    func showSuccess(username: String) {
-        status.stringValue = "已通过站点确认登录。下次打开时会验证并沿用网站登录会话；密码不会保存在墨夜阅读器中。"
-        status.textColor = color(0.18, 0.48, 0.31)
-        submitButton.title = "登录成功"
-        submitButton.isEnabled = false
-        clearPassword()
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.4) { [weak self] in self?.panel.orderOut(nil) }
-    }
-
-    @objc private func routeChanged(_ sender: NSPopUpButton) {
-        let index = sender.indexOfSelectedItem
-        guard ComicSiteRoute.allCases.indices.contains(index) else { return }
-        onRouteChange(ComicSiteRoute.allCases[index])
-    }
-
-    @objc private func submit(_ sender: Any?) {
-        guard submitButton.isEnabled else { return }
-        let username = usernameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        let password = passwordField.stringValue
-        guard !username.isEmpty, !password.isEmpty else {
-            showFailure("请输入账号和密码。")
-            return
-        }
-        let routeIndex = siteRoutePopup.indexOfSelectedItem
-        guard ComicSiteRoute.allCases.indices.contains(routeIndex) else { return }
-        onSubmit(username, password, ComicSiteRoute.allCases[routeIndex])
-    }
 }
 
 private extension String {
@@ -2042,7 +1446,7 @@ private final class ComicResultCard: NSView {
         for view in [cover, titleLabel, authorLabel, metadataLabel, idLabel] { addSubview(view) }
         hit.target = self; hit.action = #selector(readNow(_:)); hit.isBordered = false; hit.setButtonType(.momentaryChange)
         hit.identifier = NSUserInterfaceItemIdentifier("comic-card-" + result.id)
-        hit.setAccessibilityLabel(result.title + "，直接阅读"); hit.toolTip = "点击整张卡片开始阅读"
+        hit.setAccessibilityLabel(result.title + "，打开作品"); hit.toolTip = "单话作品直接阅读，多话作品选择章节"
         hit.highlightChanged = { [weak self] pressed in self?.layer?.borderColor = (pressed ? NSColor.systemPurple : borderTint(0.88)).cgColor; self?.layer?.opacity = pressed ? 0.9 : 1 }
         addSubview(hit)
         if let url = result.coverURL { OnlineMainView.fetchImage(url: url, referer: result.url) { [weak self] data in
