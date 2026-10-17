@@ -32,6 +32,8 @@ struct MoyeHomeView: View {
     @Environment(\.colorScheme) private var colorScheme
     @AppStorage("moye.appearance") private var appearance = "system"
     @StateObject private var catalog: MoyeCatalogService
+    @ObservedObject private var favorites: MoyeFavoritesStore
+    @State private var showingFavorites: Bool
     @State private var query = ""
     @State private var selectedComic: MoyeComic?
     @State private var showSettings = false
@@ -47,9 +49,13 @@ struct MoyeHomeView: View {
 
     private var route: MoyeSiteRoute { MoyeSiteRoute(rawValue: routeValue) ?? .internationalVIP }
 
-    init(catalog: MoyeCatalogService? = nil) {
+    init(catalog: MoyeCatalogService? = nil, favorites: MoyeFavoritesStore? = nil, showingFavorites: Bool = false) {
         _catalog = StateObject(wrappedValue: catalog ?? MoyeCatalogService(route: .internationalVIP))
+        _favorites = ObservedObject(wrappedValue: favorites ?? .shared)
+        _showingFavorites = State(initialValue: showingFavorites)
     }
+
+    private var displayComics: [MoyeComic] { showingFavorites ? favorites.comics : catalog.comics }
 
     var body: some View {
         NavigationStack {
@@ -65,18 +71,21 @@ struct MoyeHomeView: View {
                     searchBox
                     rankingPicker
                     listingHeader
-                    if let error = catalog.errorMessage, !catalog.comics.isEmpty {
+                    if let error = catalog.errorMessage, !catalog.comics.isEmpty, !showingFavorites {
                         Text(error).font(.footnote).foregroundStyle(.red).padding(.horizontal, 16)
                     }
-                    if catalog.isLoading && !catalog.isAppendingListing {
+                    if catalog.isLoading && !catalog.isAppendingListing && !showingFavorites {
                         HStack(spacing: 8) { ProgressView(); Text(catalog.loadingMessage).font(.caption).lineLimit(2); Spacer(); Button("取消") { catalog.cancel() }.font(.caption) }
                             .padding(.horizontal, 16).padding(.vertical, 7)
                     }
-                    if catalog.isLoading && catalog.comics.isEmpty {
+                    if showingFavorites && displayComics.isEmpty {
+                        ContentUnavailableView("还没有收藏", systemImage: "heart", description: Text("点击作品卡片、详情页或阅读页的爱心，将想看的作品加入收藏。"))
+                            .frame(maxHeight: .infinity)
+                    } else if !showingFavorites && catalog.isLoading && catalog.comics.isEmpty {
                         Spacer()
                         ProgressView("正在载入漫画卡片…")
                         Spacer()
-                    } else if let error = catalog.errorMessage, catalog.comics.isEmpty {
+                    } else if let error = catalog.errorMessage, catalog.comics.isEmpty, !showingFavorites {
                         ContentUnavailableView {
                             Label("暂时无法载入", systemImage: "wifi.exclamationmark")
                         } description: {
@@ -86,28 +95,36 @@ struct MoyeHomeView: View {
                                 .buttonStyle(.borderedProminent)
                         }
                         .frame(maxHeight: .infinity)
-                    } else if catalog.comics.isEmpty {
+                    } else if displayComics.isEmpty {
                         ContentUnavailableView("没有找到作品", systemImage: "books.vertical", description: Text("换个关键词试试。"))
                             .frame(maxHeight: .infinity)
                     } else {
                         ScrollView {
                           VStack(spacing: 12) {
                             LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 14), count: displayColumns), alignment: .center, spacing: 16) {
-                                ForEach(catalog.comics) { comic in
-                                    Button { selectedComic = comic; if catalog.isAppendingListing { catalog.cancel() } } label: {
-                                        MoyeComicCard(comic: comic)
+                                ForEach(displayComics) { comic in
+                                    Button { selectedComic = comic.onSite(catalog.rootURL); if catalog.isAppendingListing { catalog.cancel() } } label: {
+                                        MoyeComicCard(comic: comic, reserveFavoriteSpace: true)
                                     }
                                     .buttonStyle(.plain)
+                                    .overlay(alignment: .bottomTrailing) {
+                                        MoyeFavoriteButton(comic: comic, favorites: favorites)
+                                            .foregroundStyle(.purple)
+                                            .background(.regularMaterial, in: Circle())
+                                            .padding(.trailing, 5).padding(.bottom, 2)
+                                    }
                                 }
                             }
                             .frame(maxWidth: 1080)
                             .frame(maxWidth: .infinity)
                             .padding(.horizontal, 14)
                             .padding(.top, 5)
-                            loadMoreIndicator.frame(height: 36)
+                            if !showingFavorites {
+                              loadMoreIndicator.frame(height: 36)
                                 .background { GeometryReader { proxy in
                                     Color.clear.preference(key: MoyeListingBottom.self, value: proxy.frame(in: .named("moye-listing")).minY)
                                 } }
+                            }
                           }
                           .padding(.bottom, 20)
                         }
@@ -138,7 +155,7 @@ struct MoyeHomeView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar(.hidden, for: .navigationBar)
             .navigationDestination(item: $selectedComic) { comic in
-                MoyeDetailScreen(comic: comic, catalog: catalog)
+                MoyeDetailScreen(comic: comic, catalog: catalog, favorites: favorites)
             }
             .sheet(isPresented: $showSettings) {
                 MoyeSettingsSheet(appearance: $appearance, routeValue: $routeValue, columns: $columns)
@@ -168,7 +185,7 @@ struct MoyeHomeView: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text("墨夜阅读器")
                     .font(.system(size: 22, weight: .bold, design: .rounded))
-                Text(resultTitle)
+                Text(showingFavorites ? "我的收藏 · 保存在本机" : resultTitle)
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -221,28 +238,40 @@ struct MoyeHomeView: View {
     private var rankingPicker: some View {
         HStack(spacing: 8) {
             Button("每月热看") {
+                showingFavorites = false
                 isSearching = false
                 searchFocused = false
                 query = ""
                 reloadListing()
             }
-            .buttonStyle(.bordered).tint(!isSearching ? .purple : .secondary)
-            Divider().frame(height: 24)
-            Button("按观看数") { rankingOrder = "mv"; reloadListing() }
-                .buttonStyle(.bordered).tint(rankingOrder == "mv" ? .purple : .secondary)
-            Button("按点赞数") { rankingOrder = "tf"; reloadListing() }
-                .buttonStyle(.bordered).tint(rankingOrder == "tf" ? .purple : .secondary)
+            .buttonStyle(.bordered).tint(!isSearching && !showingFavorites ? .purple : .secondary)
+            .accessibilityIdentifier("show-monthly")
+            Button("我的收藏") {
+                showingFavorites = true
+                searchFocused = false
+                catalog.cancel()
+            }
+                .buttonStyle(.bordered).tint(showingFavorites ? .purple : .secondary)
+                .accessibilityIdentifier("show-favorites")
+            if !showingFavorites {
+                Divider().frame(height: 24)
+                Button("按观看数") { rankingOrder = "mv"; reloadListing() }
+                    .buttonStyle(.bordered).tint(rankingOrder == "mv" ? .purple : .secondary)
+                    .disabled(catalog.isLoading && !catalog.isAppendingListing)
+                Button("按点赞数") { rankingOrder = "tf"; reloadListing() }
+                    .buttonStyle(.bordered).tint(rankingOrder == "tf" ? .purple : .secondary)
+                    .disabled(catalog.isLoading && !catalog.isAppendingListing)
+            }
             Spacer(minLength: 0)
         }
         .font(.caption.weight(.semibold))
-        .disabled(catalog.isLoading && !catalog.isAppendingListing)
         .padding(.horizontal, 16).padding(.vertical, 7)
         .frame(height: 50)
     }
 
     private var listingHeader: some View {
         HStack {
-            Text(isSearching ? "搜索结果" : "每月热看").font(.headline)
+            Text(showingFavorites ? "我的收藏" : isSearching ? "搜索结果" : "每月热看").font(.headline)
             Spacer()
             HStack(spacing: 4) {
                 ForEach(1...3, id: \.self) { count in
@@ -256,7 +285,7 @@ struct MoyeHomeView: View {
                     .accessibilityAddTraits(displayColumns == count ? .isSelected : [])
                 }
             }
-            Text("\(catalog.comics.count) 部").font(.caption.weight(.medium)).foregroundStyle(.secondary)
+            Text("\(displayComics.count) 部").font(.caption.weight(.medium)).foregroundStyle(.secondary)
         }
         .padding(.horizontal, 17).padding(.top, 7).padding(.bottom, 7)
     }
@@ -274,11 +303,12 @@ struct MoyeHomeView: View {
     }
 
     private func loadNextPage() {
-        guard listingPosition.nearEnd, selectedComic == nil, !catalog.isLoading, catalog.hasMoreListing, catalog.listingPage > 0 else { return }
+        guard !showingFavorites, listingPosition.nearEnd, selectedComic == nil, !catalog.isLoading, catalog.hasMoreListing, catalog.listingPage > 0 else { return }
         reloadListing(append: true)
     }
 
     private func reloadListing(append: Bool = false) {
+        guard !showingFavorites else { return }
         let sort = rankingOrder == "tf" ? "点赞数" : "观看数"
         let page = append ? catalog.listingPage + 1 : 1
         if isSearching {
@@ -293,12 +323,13 @@ struct MoyeHomeView: View {
     private func performSearch() {
         let value = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !value.isEmpty else { return }
+        showingFavorites = false
         searchFocused = false
         isSearching = true
         activeQuery = value
         resultTitle = "搜索结果"
         if let id = albumID(from: value) {
-            let comic = MoyeComic(id: id, title: "JM \(id)", author: "", metadata: "", tags: [], coverURL: nil, url: route.rootURL.appending(path: "album/\(id)"))
+            let comic = MoyeComic(id: id, title: "JM \(id)", author: "", metadata: "", tags: [], coverURL: nil, url: catalog.rootURL.appending(path: "album/\(id)"))
             catalog.showDirectResult(comic)
             selectedComic = comic
         } else {
@@ -317,23 +348,26 @@ struct MoyeHomeView: View {
 struct MoyeDetailScreen: View {
     let comic: MoyeComic
     let catalog: MoyeCatalogService
+    var favorites: MoyeFavoritesStore = .shared
 
     var body: some View {
-        MoyeDetailContent(comic: comic, catalog: catalog).id(comic.url)
+        MoyeDetailContent(comic: comic, catalog: catalog, favorites: favorites).id(comic.url)
     }
 }
 
 private struct MoyeDetailContent: View {
     let comic: MoyeComic
     @ObservedObject var catalog: MoyeCatalogService
+    let favorites: MoyeFavoritesStore
     @StateObject private var session: MoyeWorkSession
     @State private var showDownload = false
     private var detail: MoyeComicDetail? { session.detail }
     private var loading: Bool { session.loading }
 
-    init(comic: MoyeComic, catalog: MoyeCatalogService) {
+    init(comic: MoyeComic, catalog: MoyeCatalogService, favorites: MoyeFavoritesStore) {
         self.comic = comic
         self.catalog = catalog
+        self.favorites = favorites
         _session = StateObject(wrappedValue: MoyeWorkSession(comic: comic, catalog: catalog))
     }
 
@@ -342,7 +376,7 @@ private struct MoyeDetailContent: View {
             VStack(alignment: .leading, spacing: 17) {
                 if let detail {
                     HStack(alignment: .top, spacing: 16) {
-                        MoyeRemoteImage(url: detail.coverURL ?? comic.coverURL, referer: comic.url)
+                        MoyeRemoteImage(url: comic.coverURL ?? detail.coverURL, referer: comic.url, contentMode: .fill)
                             .frame(width: 138, height: 190)
                             .clipShape(RoundedRectangle(cornerRadius: 15, style: .continuous))
                         VStack(alignment: .leading, spacing: 9) {
@@ -433,8 +467,13 @@ private struct MoyeDetailContent: View {
         .navigationTitle("作品详情")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar(.visible, for: .navigationBar)
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                MoyeFavoriteButton(comic: comic.resolved(with: detail), favorites: favorites)
+            }
+        }
         .navigationDestination(item: $session.readerRoute) { route in
-            MoyeComicReaderScreen(route: route, catalog: catalog)
+            MoyeComicReaderScreen(route: route, catalog: catalog, favorites: favorites)
         }
         .sheet(isPresented: $showDownload) {
             if let detail {
@@ -442,6 +481,7 @@ private struct MoyeDetailContent: View {
             }
         }
         .task(id: comic.id) { session.load() }
+        .onChange(of: detail) { _, value in favorites.refresh(comic.resolved(with: value)) }
         .onDisappear { if session.readerRoute == nil { session.cancel() } }
         .alert("无法打开作品", isPresented: Binding(
             get: { session.alertMessage != nil },
@@ -483,7 +523,7 @@ private struct MoyeSettingsSheet: View {
                     .pickerStyle(.segmented)
                     Picker("首页列数", selection: $columns) { ForEach(1...3, id: \.self) { Text("\($0) 列").tag($0) } }
                         .pickerStyle(.segmented)
-                    Text("始终按所选列数显示。窄卡片会精简介绍，完整封面保持原比例。")
+                    Text("始终按所选列数显示。窄卡片会精简介绍，封面保持原比例，等比例填充封面框。")
                         .font(.footnote).foregroundStyle(.secondary)
                 }
                 Section("缓存") {
@@ -514,7 +554,7 @@ private struct MoyeSettingsSheet: View {
                         .foregroundStyle(.secondary)
                 }
                 Section("关于") {
-                    LabeledContent("版本", value: "3.5.14 · iOS/iPadOS")
+                    LabeledContent("版本", value: "3.5.16 · iOS/iPadOS")
                     Text("搜索结果、作品详情与阅读页使用原生卡片和控件。网页仅用于后台解析站点数据。")
                         .font(.footnote)
                         .foregroundStyle(.secondary)

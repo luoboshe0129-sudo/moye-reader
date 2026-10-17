@@ -80,6 +80,7 @@ final class IOSSmokeDelegate {
         checks.append("DOM-ready homepage, identical card metadata, no account store")
 
         let singleComic = service.comics[0], multiComic = service.comics[1]
+        try await verifyImageQueue(root: root)
         try await verifySequentialWorks(root: root)
         let single = MoyeWorkSession(comic: singleComic, catalog: service)
         started = Date()
@@ -107,6 +108,9 @@ final class IOSSmokeDelegate {
         try await wait({ multi.readerRoute != nil || multi.alertMessage != nil }, "chosen second chapter")
         try require(multi.readerRoute?.chapter.id == "100102", "Explicit chapter selection opened the wrong chapter")
         try require(multi.readerRoute?.pages.urls.first?.lastPathComponent == "2.png", "page_arr order was lost")
+        try require(single.detail?.coverURL == singleComic.coverURL && multi.detail?.coverURL == multiComic.coverURL, "Chapter thumbnail replaced the original work cover")
+        try require(service.comics.first(where: { $0.id == multiComic.id })?.coverURL == multiComic.coverURL, "Opening chapters changed the listing cover")
+        checks.append("listing and detail retain original cover after different chapter thumbnails and chapter navigation")
         checks.append("multi-chapter selection, delayed chapter list, explicit second chapter, page ordering")
 
         service.loadRanking(order: "tf")
@@ -152,6 +156,8 @@ final class IOSSmokeDelegate {
         try await verifyReader(root: root)
         try await verifyChapterPreload(root: root, comic: multiComic)
         try await verifyCoverCards(comic: multiComic)
+        try await verifyCoverFill(root: root)
+        try await verifyFavorites(comics: [singleComic, multiComic, service.comics[0]])
         try await verifyNativeScreens(comic: multiComic, route: multi.readerRoute!)
         try await verifyLargeListing(root: root)
     }
@@ -327,6 +333,88 @@ final class IOSSmokeDelegate {
         checks.append("full portrait covers at 110/190/300/520pt, compact title instead of squeezed description")
     }
 
+    private func verifyCoverFill(root: URL) async throws {
+        let controller = window!.rootViewController!
+        for shape in ["wide", "tall"] {
+          for width in [CGFloat(110), CGFloat(300)] {
+            let metrics = MoyeComicCardLayout.metrics(width: width)
+            let comic = MoyeComic(id: "ratio-\(shape)", title: "比例检查", author: "", metadata: "", tags: [],
+                coverURL: URL(string: root.absoluteString + "/media/cover-ratio-test.png?\(shape)=1"), url: root)
+            let host = UIHostingController(rootView: MoyeComicCard(comic: comic).environment(\.scenePhase, .active).ignoresSafeArea())
+            controller.addChild(host); host.view.frame = CGRect(x: 0, y: 20, width: width, height: metrics.height)
+            controller.view.addSubview(host.view); host.didMove(toParent: controller)
+            try await wait({ MoyeReadingImageCache.covers.imageIfCached(url: comic.coverURL!, albumID: 0, scrambleID: 0) != nil }, "ratio cover")
+            try await Task.sleep(nanoseconds: 200_000_000)
+            let cg = try screenshot(host.view, name: "cover-fill-\(shape)-\(Int(width))").cgImage!
+            let context = CGContext(data: nil, width: cg.width, height: cg.height, bitsPerComponent: 8, bytesPerRow: cg.width * 4,
+                space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue | CGBitmapInfo.byteOrder32Big.rawValue)!
+            context.draw(cg, in: CGRect(x: 0, y: 0, width: cg.width, height: cg.height))
+            let bytes = context.data!.assumingMemoryBound(to: UInt8.self)
+            // The blue source must meet all four edges, and its white circle
+            // must remain circular after proportional fill and clipping.
+            for point in [CGPoint(x: metrics.cover.midX, y: metrics.cover.minY + 2), CGPoint(x: metrics.cover.midX, y: metrics.cover.maxY - 3),
+                          CGPoint(x: metrics.cover.minX + 2, y: metrics.cover.midY), CGPoint(x: metrics.cover.maxX - 3, y: metrics.cover.midY)] {
+                let offset = (Int(point.y) * cg.width + Int(point.x)) * 4
+                try require(zip([80, 140, 220], (0..<3).map { Int(bytes[offset + $0]) }).allSatisfy { abs($0 - $1) < 20 }, "Cover leaves a border at \(shape)/\(width)")
+            }
+            var white = CGRect.null
+            for y in Int(metrics.cover.minY + 12)..<Int(metrics.cover.maxY - 12) {
+                for x in Int(metrics.cover.minX + 12)..<Int(metrics.cover.maxX - 12) {
+                    let offset = (y * cg.width + x) * 4
+                    if (0..<3).allSatisfy({ bytes[offset + $0] > 220 }) { white = white.union(CGRect(x: x, y: y, width: 1, height: 1)) }
+                }
+            }
+            try require(!white.isNull && abs(white.width - white.height) <= 2, "Cover stretched its original proportions: \(white)")
+            host.willMove(toParent: nil); host.view.removeFromSuperview(); host.removeFromParent()
+          }
+        }
+        checks.append("wide/tall covers fill every edge at narrow/wide card sizes; rendered circle retains original ratio")
+    }
+
+    private func verifyFavorites(comics: [MoyeComic]) async throws {
+        let domain = "moye.smoke.favorites.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: domain)!
+        defer { defaults.removePersistentDomain(forName: domain) }
+        let favorites = MoyeFavoritesStore(defaults: defaults)
+        try require(favorites.comics.isEmpty, "Fresh favorites should be empty")
+        for comic in comics { favorites.toggle(comic) }
+        try require(favorites.comics.map(\.id) == comics.reversed().map(\.id), "Favorites lost insertion order")
+        let changed = MoyeComic(id: comics[0].id, title: "更新后的标题", author: "作者", metadata: "", tags: [],
+            coverURL: URL(string: "https://example.invalid/chapter-thumb.png"), url: comics[0].url)
+        favorites.refresh(changed)
+        let reopened = MoyeFavoritesStore(defaults: defaults)
+        try require(reopened.comics.count == 3 && reopened.comics.last?.title == changed.title && reopened.comics.last?.coverURL == comics[0].coverURL, "Favorites persistence changed the cover or metadata")
+        let moved = comics[0].onSite(MoyeSiteRoute.southeastAsiaORG.rootURL)
+        try require(reopened.contains(moved) && moved.url.host == "jmcomic-zzz.org" && moved.url.path == "/album/\(comics[0].id)" && moved.coverURL == comics[0].coverURL, "Favorite identity or route rebasing failed")
+        reopened.toggle(moved)
+        try require(reopened.comics.count == 2 && !reopened.contains(comics[0]), "Favorite removal depends on the selected route")
+        try require(MoyeFavoritesStore(defaults: defaults).comics.count == 2, "Favorite removal was not persisted")
+        reopened.toggle(comics[0])
+
+        let catalog = service.independentLoader()
+        let controller = window!.rootViewController!
+        let bounds = controller.view.bounds.size
+        let canvas = UIDevice.current.userInterfaceIdiom == .pad ? CGSize(width: max(bounds.width, bounds.height), height: min(bounds.width, bounds.height)) : bounds
+        UserDefaults.standard.set(1, forKey: "moye.columns")
+        let host = UIHostingController(rootView: MoyeHomeView(catalog: catalog, favorites: reopened, showingFavorites: true).environment(\.scenePhase, .active))
+        controller.addChild(host); host.view.frame = CGRect(origin: .zero, size: canvas)
+        controller.view.addSubview(host.view); host.didMove(toParent: controller)
+        try await wait({ reopened.comics.allSatisfy { MoyeReadingImageCache.covers.imageIfCached(url: $0.coverURL!, albumID: 0, scrambleID: 0) != nil } }, "favorite covers")
+        for columns in 1...3 {
+            UserDefaults.standard.set(columns, forKey: "moye.columns")
+            try await Task.sleep(nanoseconds: 300_000_000)
+            let image = try screenshot(host.view, name: "favorites-\(columns)-columns")
+            try require(coverColumnCount(image) == columns, "Favorites do not reuse the selected card columns")
+        }
+        for comic in comics { reopened.toggle(comic) }
+        try await Task.sleep(nanoseconds: 200_000_000)
+        let empty = try screenshot(host.view, name: "favorites-empty")
+        try require(coverColumnCount(empty) == 0, "Removed favorites remain in the visible grid")
+        try require(catalog.comics.isEmpty && catalog.listingPage == 0 && !catalog.isLoading, "Favorites unexpectedly fetched monthly pages")
+        host.willMove(toParent: nil); host.view.removeFromSuperview(); host.removeFromParent()
+        checks.append("favorites persist metadata and stable covers; remove by work ID across routes; same 1–3 column UI and reactive empty state without fetching monthly pages")
+    }
+
     private func verifyReader(root: URL) async throws {
         let chapter = MoyeChapter(id: "100101", title: "geometry", url: root.appendingPathComponent("photo/100101"))
         func pages(_ count: Int) -> MoyePageSet {
@@ -495,12 +583,129 @@ final class IOSSmokeDelegate {
         try require(encoded?.fileExtension == "png" && encoded?.data == normal.pngData(), "Original PNG changed on export")
     }
 
+    private func verifyImageQueue(root: URL) async throws {
+        MoyeChapterPreloader.shared.cancel()
+        MoyeReadingImageCache.shared.clear()
+        MoyePageDataStore.shared.clear()
+        let cache = MoyeReadingImageCache.shared
+        let view = MoyeReaderViewport(frame: CGRect(x: 0, y: 0, width: 1000, height: 700))
+        view.testConfigure(imageRequests: true, animatedTurns: false)
+        window!.rootViewController!.view.addSubview(view)
+        view.layoutIfNeeded()
+        func pages(_ chapter: Int, fast: Bool = false) -> MoyePageSet {
+            MoyePageSet(urls: (1...12).map { URL(string: "media/reader-queue/\(chapter)/\($0).png" + (fast ? "?fast=1" : ""), relativeTo: root)!.absoluteURL }, albumID: chapter, scrambleID: 0)
+        }
+        func chapter(_ id: Int) -> MoyeChapter { MoyeChapter(id: "\(id)", title: "queue", url: root.appendingPathComponent("photo/\(id)")) }
+        func loaded(_ pages: MoyePageSet, _ indices: [Int]) -> Bool {
+            indices.allSatisfy { cache.imageIfCached(url: pages.urls[$0], albumID: pages.albumID, scrambleID: 0) != nil }
+        }
+        func count(_ prefix: String) async throws -> Int {
+            var url = URLComponents(url: root.appendingPathComponent("fixture/queue-count"), resolvingAgainstBaseURL: false)!
+            url.queryItems = [URLQueryItem(name: "prefix", value: prefix)]
+            let (data, _) = try await URLSession.shared.data(from: url.url!)
+            return try JSONDecoder().decode(Int.self, from: data)
+        }
+        // Seed only the first four images, then stall the two background raw
+        // requests. The fifth/sixth images are already queued as nearby pages.
+        // Making them visible must promote the existing requests end to end.
+        let initial = pages(880001, fast: true)
+        view.configure(pages: initial, chapter: chapter(880001), mode: .spread, page: 0)
+        try await wait({ loaded(initial, [0, 1, 2, 3]) }, "first four queue pages")
+        let blockers = (1...2).map { index in Task {
+            await MoyePageDataStore.shared.data(url: root.appendingPathComponent("media/queue-blockers/\(index).png"), referer: root, priority: false)
+        } }
+        var started = CACurrentMediaTime()
+        while try await count("/media/queue-blockers/") < 2 {
+            try require(CACurrentMediaTime() - started < 3, "Background blockers did not start")
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        started = CACurrentMediaTime()
+        let promotedURL = root.appendingPathComponent("media/geometry/promoted.png")
+        var promoted = false
+        let preview = cache.request(url: promotedURL, referer: root, albumID: 0, scrambleID: 0, priority: false) { _ in }
+        try await Task.sleep(nanoseconds: 100_000_000)
+        let visible = cache.request(url: promotedURL, referer: root, albumID: 0, scrambleID: 0, priority: true) { promoted = $0 != nil }
+        try await wait({ promoted }, "visible request promoted past background queue", timeout: 1.5)
+        timings["promoted_visible_image"] = CACurrentMediaTime() - started
+        if let preview { cache.cancel(preview) }; if let visible { cache.cancel(visible) }
+        view.configure(pages: initial, chapter: chapter(880001), mode: .spread, page: 2)
+        try await Task.sleep(nanoseconds: 150_000_000)
+        started = CACurrentMediaTime()
+        view.configure(pages: initial, chapter: chapter(880001), mode: .spread, page: 4)
+        try await wait({ loaded(initial, [4, 5]) }, "fifth and sixth pages stayed at preload priority", timeout: 1.5)
+        timings["fifth_sixth_visible_images"] = CACurrentMediaTime() - started
+        blockers.forEach { $0.cancel() }
+        for task in blockers { _ = await task.value }
+        // Visible subscribers can leave originals with preload subscribers.
+        // Those downloads must become interruptible background work again.
+        let sharedURLs = (1...4).map { root.appendingPathComponent("media/queue-blockers/shared/\($0).png") }
+        let background = sharedURLs.map { url in Task { await MoyePageDataStore.shared.data(url: url, referer: root, priority: false) } }
+        try await Task.sleep(nanoseconds: 100_000_000)
+        let foreground = sharedURLs.map { url in Task { await MoyePageDataStore.shared.data(url: url, referer: root, priority: true) } }
+        started = CACurrentMediaTime()
+        while try await count("/media/queue-blockers/shared/") < 4 {
+            try require(CACurrentMediaTime() - started < 3, "Shared requests did not fill network slots")
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        foreground.forEach { $0.cancel() }
+        for task in foreground { _ = await task.value }
+        var reclaimed = false
+        started = CACurrentMediaTime()
+        let urgent = Task { reclaimed = await MoyeRuntimeData.imageData(url: root.appendingPathComponent("media/geometry/reclaimed.png"), referer: root) != nil }
+        try await wait({ reclaimed }, "preloads retained all foreground slots", timeout: 1.5)
+        timings["reclaim_preload_slot"] = CACurrentMediaTime() - started
+        urgent.cancel()
+        background.forEach { $0.cancel() }
+        for task in background { _ = await task.value }
+        // Four slow requests from an old spread must not occupy the next
+        // spread or another chapter until their network timeouts expire.
+        for id in 880002...880003 {
+            let current = pages(id)
+            view.configure(pages: current, chapter: chapter(id), mode: .spread, page: 4)
+            started = CACurrentMediaTime()
+            while try await count("/media/reader-queue/\(id)/") < 4 {
+                try require(CACurrentMediaTime() - started < 3, "Old spread requests did not start")
+                try await Task.sleep(nanoseconds: 20_000_000)
+            }
+            started = CACurrentMediaTime()
+            view.configure(pages: current, chapter: chapter(id), mode: .spread, page: 8)
+            try await wait({ loaded(current, [8, 9]) }, "later spread blocked by old images", timeout: 1.5)
+            timings["skip_stalled_spread"] = CACurrentMediaTime() - started
+            view.configure(pages: current, chapter: chapter(id), mode: .spread, page: 4)
+            try await Task.sleep(nanoseconds: 100_000_000)
+            let next = pages(id + 10)
+            started = CACurrentMediaTime()
+            view.configure(pages: next, chapter: chapter(id + 10), mode: .spread, page: 0)
+            try await wait({ loaded(next, [0, 1, 2, 3]) }, "new chapter blocked by old images", timeout: 1.5)
+            timings["chapter_images_after_stalled_requests"] = CACurrentMediaTime() - started
+        }
+        let abandoned = pages(880009)
+        view.configure(pages: abandoned, chapter: chapter(880009), mode: .spread, page: 4)
+        try await Task.sleep(nanoseconds: 150_000_000)
+        MoyeReaderViewportRepresentable.dismantleUIView(view, coordinator: ())
+        let replacement = MoyeReaderViewport(frame: view.frame)
+        replacement.testConfigure(imageRequests: true, animatedTurns: false)
+        window!.rootViewController!.view.addSubview(replacement)
+        let replacementPages = pages(880019)
+        replacement.configure(pages: replacementPages, chapter: chapter(880019), mode: .spread, page: 0)
+        try await wait({ loaded(replacementPages, [0, 1]) }, "closed reader retained image requests", timeout: 1.5)
+        MoyeReaderViewportRepresentable.dismantleUIView(replacement, coordinator: ())
+        replacement.removeFromSuperview()
+        view.removeFromSuperview()
+        cache.clear()
+        MoyePageDataStore.shared.clear()
+        checks.append("visible image promotion bypasses stalled preloads; obsolete spread/chapter requests release slots immediately")
+    }
+
     private func verifyChapterPreload(root: URL, comic: MoyeComic) async throws {
         let chapters = (850001...850003).map { id in MoyeChapter(id: "\(id)", title: "preload \(id)", url: root.appendingPathComponent("photo/\(id)")) }
-        func urls(_ id: String) -> [URL] { (1...2).map { root.appendingPathComponent("media/photos/\(id)/\($0).png") } }
+        func urls(_ id: String) -> [URL] { (1...12).map { root.appendingPathComponent("media/photos/\(id)/\($0).png") } }
         let pages = MoyePageSet(urls: urls(chapters[0].id), albumID: 850001, scrambleID: 0)
         let route = MoyeReaderRoute(comic: comic, title: comic.title, chapter: chapters[0], chapters: chapters, pages: pages)
-        MoyeChapterPreloader.shared.start(route: route, catalog: service)
+        let oldOwner = UUID(), activeOwner = UUID()
+        MoyeChapterPreloader.shared.start(route: route, catalog: service, owner: oldOwner)
+        MoyeChapterPreloader.shared.start(route: route, catalog: service, owner: activeOwner)
+        MoyeChapterPreloader.shared.cancel(owner: oldOwner)
         let expected = urls(chapters[0].id) + urls(chapters[1].id)
         try await wait({ expected.allSatisfy { MoyePageDataStore.shared.contains($0) } }, "current and next chapter originals")
         try require(urls(chapters[2].id).allSatisfy { !MoyePageDataStore.shared.contains($0) }, "Preloaded beyond the next chapter")
@@ -508,8 +713,8 @@ final class IOSSmokeDelegate {
         let cached = await MoyeRuntimeData.imageData(url: expected.last!, referer: chapters[1].url)
         timings["preloaded_page_read"] = CACurrentMediaTime() - start
         try require(cached != nil, "Preloaded page cannot be reused")
-        MoyeChapterPreloader.shared.cancel()
-        checks.append("complete current/next chapter originals cached, later chapter untouched, cached image reused")
+        MoyeChapterPreloader.shared.cancel(owner: activeOwner)
+        checks.append("all 24 current/next chapter originals preload without turning pages; later chapter untouched; stale reader exit cannot cancel active preload")
     }
 
     private func verifyLargeListing(root: URL) async throws {

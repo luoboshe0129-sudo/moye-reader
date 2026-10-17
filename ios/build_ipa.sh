@@ -30,7 +30,7 @@ app = stage / 'Payload/MoyeReaderIOS.app'
 with (app / 'Info.plist').open('rb') as handle:
     info = plistlib.load(handle)
 assert info['CFBundleShortVersionString'] == version
-assert info['CFBundleVersion'] == '41'
+assert info['CFBundleVersion'] == '43'
 assert info['UIDeviceFamily'] == [1, 2]
 assert info['MinimumOSVersion'] == '17.0'
 assert not (app / 'embedded.mobileprovision').exists()

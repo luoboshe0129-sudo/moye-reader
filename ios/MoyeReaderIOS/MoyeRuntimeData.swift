@@ -46,8 +46,8 @@ enum MoyeRuntimeData {
         return result
     }
 
-    static func imageData(url: URL, referer: URL?, cover: Bool = false, priority: Bool = true) async -> Data? {
-        if !cover { return await MoyePageDataStore.shared.data(url: url, referer: referer, priority: priority) }
+    static func imageData(url: URL, referer: URL?, cover: Bool = false, priority: Bool = true, requestID: UUID = UUID()) async -> Data? {
+        if !cover { return await MoyePageDataStore.shared.data(url: url, referer: referer, priority: priority, requestID: requestID) }
         return await networkImageData(url: url, referer: referer, cover: true)
     }
 
@@ -78,12 +78,16 @@ enum MoyeRuntimeData {
 @MainActor
 final class MoyePageDataStore {
     static let shared = MoyePageDataStore()
+    private struct Waiter {
+        let continuation: CheckedContinuation<Data?, Never>
+        var priority: Bool
+    }
     private struct Job {
         let id = UUID()
         let url: URL
         let referer: URL?
-        var priority: Bool
-        var waiting: [UUID: CheckedContinuation<Data?, Never>]
+        var waiting: [UUID: Waiter]
+        var priority: Bool { waiting.values.contains { $0.priority } }
     }
     private var directory: URL
     private var files: [String: URL] = [:]
@@ -108,28 +112,37 @@ final class MoyePageDataStore {
 
     func contains(_ url: URL) -> Bool { files[url.absoluteString] != nil }
 
-    func data(url: URL, referer: URL?, priority: Bool) async -> Data? {
+    func data(url: URL, referer: URL?, priority: Bool, requestID: UUID = UUID()) async -> Data? {
         guard !Task.isCancelled else { return nil }
         let key = url.absoluteString
         if let file = files[key], let cached = await Task.detached(priority: priority ? .userInitiated : .utility, operation: {
             try? Data(contentsOf: file, options: .mappedIfSafe)
         }).value { return cached }
-        let token = UUID()
+        let token = requestID
         return await withTaskCancellationHandler(operation: {
             await withCheckedContinuation { continuation in
                 guard !Task.isCancelled else { continuation.resume(returning: nil); return }
                 if var job = jobs[key] {
-                    job.waiting[token] = continuation
-                    job.priority = job.priority || priority
+                    job.waiting[token] = Waiter(continuation: continuation, priority: priority)
                     jobs[key] = job
                     if priority { background.remove(key) }
                 } else {
-                    jobs[key] = Job(url: url, referer: referer, priority: priority, waiting: [token: continuation])
+                    jobs[key] = Job(url: url, referer: referer, waiting: [token: Waiter(continuation: continuation, priority: priority)])
                     queue.append(key)
                 }
                 pump()
             }
         }, onCancel: { Task { @MainActor [weak self] in self?.cancel(key: key, token: token) } })
+    }
+
+    func promote(url: URL, requestID: UUID) {
+        let key = url.absoluteString
+        guard var job = jobs[key], var waiter = job.waiting[requestID], !waiter.priority else { return }
+        waiter.priority = true
+        job.waiting[requestID] = waiter
+        jobs[key] = job
+        background.remove(key)
+        pump()
     }
 
     private func cancel(key: String, token: UUID) {
@@ -138,12 +151,22 @@ final class MoyePageDataStore {
         if job.waiting.isEmpty {
             jobs.removeValue(forKey: key); queue.removeAll { $0 == key }
             tasks.removeValue(forKey: key)?.cancel(); background.remove(key)
+        } else if !job.priority, tasks[key] != nil {
+            background.insert(key)
         }
-        waiting.resume(returning: nil)
+        waiting.continuation.resume(returning: nil)
         pump()
     }
 
     private func pump() {
+        // A page that is now visible can reclaim a slot from an in-flight
+        // preload. Preserve its subscribers and resume that preload later.
+        if tasks.count >= 4, queue.contains(where: { jobs[$0]?.priority == true }),
+           let key = background.first {
+            tasks.removeValue(forKey: key)?.cancel()
+            background.remove(key)
+            queue.append(key)
+        }
         while tasks.count < 4 {
             let next = queue.firstIndex(where: { jobs[$0]?.priority == true })
                 ?? (background.count < 2 ? queue.startIndex < queue.endIndex ? queue.startIndex : nil : nil)
@@ -164,7 +187,7 @@ final class MoyePageDataStore {
                 self.tasks.removeValue(forKey: key); self.background.remove(key)
                 let waiting = self.jobs.removeValue(forKey: key)?.waiting.values
                 if saved { self.files[key] = destination }
-                waiting?.forEach { $0.resume(returning: data) }
+                waiting?.forEach { $0.continuation.resume(returning: data) }
                 self.pump()
             }
         }
@@ -172,7 +195,7 @@ final class MoyePageDataStore {
 
     func clear() {
         tasks.values.forEach { $0.cancel() }; tasks.removeAll()
-        let waiting = jobs.values.flatMap { Array($0.waiting.values) }
+        let waiting = jobs.values.flatMap { $0.waiting.values.map(\.continuation) }
         jobs.removeAll(); queue.removeAll(); background.removeAll(); files.removeAll()
         let old = directory; directory = Self.makeDirectory()
         Task.detached(priority: .utility) { try? FileManager.default.removeItem(at: old) }

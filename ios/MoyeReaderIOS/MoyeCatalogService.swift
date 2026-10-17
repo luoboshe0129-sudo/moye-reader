@@ -4,7 +4,7 @@ import SwiftUI
 import UIKit
 import WebKit
 
-struct MoyeComic: Identifiable, Hashable {
+struct MoyeComic: Identifiable, Hashable, Codable {
     let id: String
     let title: String
     let author: String
@@ -12,6 +12,16 @@ struct MoyeComic: Identifiable, Hashable {
     let tags: [String]
     let coverURL: URL?
     let url: URL
+
+    func resolved(with detail: MoyeComicDetail?) -> MoyeComic {
+        MoyeComic(id: id, title: detail?.title ?? title, author: detail?.author ?? author,
+            metadata: metadata, tags: tags, coverURL: coverURL ?? detail?.coverURL, url: url)
+    }
+
+    func onSite(_ root: URL) -> MoyeComic {
+        MoyeComic(id: id, title: title, author: author, metadata: metadata, tags: tags,
+            coverURL: coverURL, url: root.appending(path: "album/\(id)"))
+    }
 }
 
 struct MoyeChapter: Identifiable, Hashable {
@@ -405,8 +415,7 @@ final class MoyeCatalogService: NSObject, ObservableObject, WKNavigationDelegate
     private func updateCard(_ detail: MoyeComicDetail) {
         comics = comics.map { comic in
             guard comic.id == detail.comicID else { return comic }
-            return MoyeComic(id: comic.id, title: detail.title, author: detail.author,
-                metadata: comic.metadata, tags: comic.tags, coverURL: detail.coverURL ?? comic.coverURL, url: comic.url)
+            return comic.resolved(with: detail)
         }
     }
 
@@ -422,7 +431,7 @@ final class MoyeCatalogService: NSObject, ObservableObject, WKNavigationDelegate
                 .joined(separator: " ")
             return MoyeChapter(id: id, title: name.isEmpty ? "第 \(index + 1) 话" : name, url: normalizedURL(item["url"], fallback: fallback))
         }
-        let cover = (record["cover"] as? String).flatMap(URL.init(string:)) ?? comic.coverURL
+        let cover = comic.coverURL ?? (record["cover"] as? String).flatMap(URL.init(string:))
         return MoyeComicDetail(
             comicID: comic.id,
             title: (record["title"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines).nonEmpty ?? comic.title,
@@ -577,6 +586,7 @@ final class MoyeReadingImageCache {
     static let covers = MoyeReadingImageCache(cover: true)
 
     private struct Job {
+        let id = UUID()
         let key: String
         let url: URL
         let referer: URL?
@@ -669,8 +679,26 @@ final class MoyeReadingImageCache {
                 callbacks: token.flatMap { token in completion.map { [token: $0] } } ?? [:], prefetch: completion == nil)
             if priority { queue.insert(key, at: 0) } else { queue.append(key) }
         }
-        pump()
+        if priority { promote(key: key) } else { pump() }
         return token
+    }
+
+    func promote(_ token: UUID) {
+        guard let key = subscriptions[token] else { return }
+        promote(key: key)
+    }
+
+    private func promote(key: String) {
+        guard var job = jobs[key] else { return }
+        job.priority = true
+        jobs[key] = job
+        activePreviewKeys.remove(key)
+        if let index = queue.firstIndex(of: key), index > 0 {
+            queue.remove(at: index)
+            queue.insert(key, at: 0)
+        }
+        if !cover { MoyePageDataStore.shared.promote(url: job.url, requestID: job.id) }
+        pump()
     }
 
     func cancel(_ token: UUID) {
@@ -707,17 +735,18 @@ final class MoyeReadingImageCache {
             if !job.priority { activePreviewKeys.insert(key) }
             let requestGeneration = generation
             let task = Task { [weak self] in
-                let (image, data) = await Self.load(job, cover: self?.cover ?? false)
+                guard let current = self?.jobs[key], current.id == job.id else { return }
+                let (image, data) = await Self.load(current, cover: self?.cover ?? false)
                 guard !Task.isCancelled else { return }
                 guard let self else { return }
-                self.finish(key: key, image: image, data: data, generation: requestGeneration)
+                self.finish(key: key, jobID: job.id, image: image, data: data, generation: requestGeneration)
             }
             activeTasks[key] = task
         }
     }
 
-    private func finish(key: String, image: UIImage?, data: Data?, generation requestGeneration: UUID) {
-        guard generation == requestGeneration, jobs[key] != nil else { return }
+    private func finish(key: String, jobID: UUID, image: UIImage?, data: Data?, generation requestGeneration: UUID) {
+        guard generation == requestGeneration, jobs[key]?.id == jobID else { return }
         activeLoads = max(0, activeLoads - 1)
         activeTasks.removeValue(forKey: key)
         activePreviewKeys.remove(key)
@@ -734,7 +763,7 @@ final class MoyeReadingImageCache {
     }
 
     private static func load(_ job: Job, cover: Bool) async -> (UIImage?, Data?) {
-        guard let data = await MoyeRuntimeData.imageData(url: job.url, referer: job.referer, cover: cover, priority: job.priority), !Task.isCancelled else { return (nil, nil) }
+        guard let data = await MoyeRuntimeData.imageData(url: job.url, referer: job.referer, cover: cover, priority: job.priority, requestID: job.id), !Task.isCancelled else { return (nil, nil) }
         let image = await Task.detached(priority: .userInitiated) { () -> UIImage? in
             if cover, let source = CGImageSourceCreateWithData(data as CFData, [kCGImageSourceShouldCache: false] as CFDictionary),
                let thumbnail = CGImageSourceCreateThumbnailAtIndex(source, 0, [

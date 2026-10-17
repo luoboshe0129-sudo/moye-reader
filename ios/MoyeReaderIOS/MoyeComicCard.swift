@@ -30,6 +30,7 @@ enum MoyeComicCardLayout {
 struct MoyeComicCard: View {
     @Environment(\.colorScheme) private var colorScheme
     let comic: MoyeComic
+    var reserveFavoriteSpace = false
 
     var body: some View {
         GeometryReader { geometry in
@@ -40,6 +41,7 @@ struct MoyeComicCard: View {
                     Text(comic.title).font(.system(size: 12, weight: .semibold))
                         .foregroundStyle(.primary).lineLimit(2).multilineTextAlignment(.leading)
                         .frame(maxWidth: .infinity, alignment: .leading).frame(height: 30, alignment: .topLeading)
+                        .padding(.trailing, reserveFavoriteSpace ? 36 : 0)
                 }.padding(10)
             } else {
               HStack(alignment: .top, spacing: 14) {
@@ -62,6 +64,7 @@ struct MoyeComicCard: View {
                     Text("JM \(comic.id)")
                         .font(.caption.monospacedDigit().weight(.semibold))
                         .foregroundStyle(.secondary)
+                        .padding(.trailing, reserveFavoriteSpace ? 36 : 0)
                 }
                 .frame(width: metrics.information.width, height: metrics.information.height, alignment: .topLeading)
             }
@@ -77,7 +80,7 @@ struct MoyeComicCard: View {
     }
 
     private func cover(_ metrics: MoyeComicCardLayout.Metrics) -> some View {
-        MoyeRemoteImage(url: comic.coverURL, referer: comic.url, contentMode: .fit)
+        MoyeRemoteImage(url: comic.coverURL, referer: comic.url, contentMode: .fill)
             .frame(width: metrics.cover.width, height: metrics.cover.height)
             .background(Color(uiColor: .tertiarySystemGroupedBackground))
             .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))

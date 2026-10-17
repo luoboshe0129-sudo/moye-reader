@@ -108,6 +108,7 @@ final class MoyeReaderBridge: ObservableObject {
     weak var viewport: MoyeReaderViewport?
     func advance(forward: Bool) -> Bool { viewport?.scrollOneScreen(forward: forward) ?? false }
     func prepareTurn(forward: Bool) { viewport?.prepareTurn(forward: forward) }
+    func pauseLoading() { viewport?.pauseLoading() }
     func suspend() { viewport?.suspend() }
     func resume() { viewport?.resume() }
 }
@@ -122,6 +123,7 @@ struct MoyeReaderViewportRepresentable: UIViewRepresentable {
     var onToggleChrome: () -> Void
 
     func makeUIView(context: Context) -> MoyeReaderViewport { MoyeReaderViewport() }
+    static func dismantleUIView(_ view: MoyeReaderViewport, coordinator: ()) { view.pauseLoading() }
     func updateUIView(_ view: MoyeReaderViewport, context: Context) {
         bridge.viewport = view
         view.onState = { [weak bridge] state in
@@ -145,6 +147,7 @@ final class MoyeReaderViewport: UIView, UIScrollViewDelegate, UIGestureRecognize
     private var slices: [Int: MoyeReaderSliceView] = [:]
     private var images: [Int: UIImage] = [:]
     private var requests = Set<Int>()
+    private var subscriptions: [Int: UUID] = [:]
     private var failures = Set<Int>()
     private var generation = UUID()
     private var previousSize = CGSize.zero
@@ -189,7 +192,6 @@ final class MoyeReaderViewport: UIView, UIScrollViewDelegate, UIGestureRecognize
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     func configure(pages: MoyePageSet, chapter: MoyeChapter, mode newMode: MoyeReadingMode, page newPage: Int) {
-        suspended = false
         let newChapter = self.chapter?.url != chapter.url || pageSet != pages
         let modeChanged = mode != newMode
         let spreadChanged = newMode == .spread && page != (newPage / 2) * 2
@@ -199,8 +201,10 @@ final class MoyeReaderViewport: UIView, UIScrollViewDelegate, UIGestureRecognize
         else if newChapter || modeChanged || spreadChanged { finishTurn() }
         if newChapter || modeChanged || spreadChanged { requestedTurnForward = nil }
         if newChapter {
+            suspended = false
             generation = UUID()
-            requests.removeAll(); failures.removeAll(); images.removeAll(); sizes.removeAll()
+            cancelImages()
+            failures.removeAll(); images.removeAll(); sizes.removeAll()
             self.chapter = chapter; pageSet = pages
             for index in pages.urls.indices {
                 sizes[index] = MoyeReadingImageCache.shared.sizeIfKnown(url: pages.urls[index], albumID: pages.albumID, scrambleID: pages.scrambleID)
@@ -313,6 +317,9 @@ final class MoyeReaderViewport: UIView, UIScrollViewDelegate, UIGestureRecognize
         guard !suspended, bounds.width > 0, bounds.height > 0 else { return }
         let buffered = drawingWindow()
         let visible = layoutInfo.visiblePages(in: buffered, continuous: mode != .spread)
+        let nearby = (mode == .spread ? [page + 2, page + 3, page - 1] : [(visible.last ?? page) + 1, (visible.first ?? page) - 1])
+            .filter { pageSet.urls.indices.contains($0) }
+        cancelImages(keeping: Set(visible + nearby))
         for index in Array(slices.keys) where !visible.contains(index) {
             slices.removeValue(forKey: index)?.removeFromSuperview()
             images.removeValue(forKey: index)
@@ -339,10 +346,7 @@ final class MoyeReaderViewport: UIView, UIScrollViewDelegate, UIGestureRecognize
             requestImage(index, priority: true)
         }
         // Schedule visible pages before nearby previews. Never queue an entire book.
-        let nearby: [Int]
-        if mode == .spread { nearby = [page + 2, page + 3, page - 1] }
-        else { nearby = [(visible.last ?? page) + 1, (visible.first ?? page) - 1] }
-        for index in nearby where pageSet.urls.indices.contains(index) { requestImage(index, priority: false) }
+        for index in nearby { requestImage(index, priority: false) }
         publishState()
     }
 
@@ -369,7 +373,11 @@ final class MoyeReaderViewport: UIView, UIScrollViewDelegate, UIGestureRecognize
         #if MOYE_IOS_DIAGNOSTICS
         if testDisableImageRequests { return }
         #endif
-        guard pageSet.urls.indices.contains(index), !requests.contains(index), !failures.contains(index) else { return }
+        guard pageSet.urls.indices.contains(index), !failures.contains(index) else { return }
+        if requests.contains(index) {
+            if priority, let token = subscriptions[index] { MoyeReadingImageCache.shared.promote(token) }
+            return
+        }
         let url = pageSet.urls[index]
         if let image = MoyeReadingImageCache.shared.imageIfCached(url: url, albumID: pageSet.albumID, scrambleID: pageSet.scrambleID) {
             if sizes[index] != image.size {
@@ -384,15 +392,24 @@ final class MoyeReaderViewport: UIView, UIScrollViewDelegate, UIGestureRecognize
         }
         requests.insert(index)
         let active = generation
-        MoyeReadingImageCache.shared.request(url: url, referer: chapter?.url, albumID: pageSet.albumID, scrambleID: pageSet.scrambleID, priority: priority) { [weak self] image in
-            guard let self, self.generation == active, !self.suspended else { return }
+        let token = MoyeReadingImageCache.shared.request(url: url, referer: chapter?.url, albumID: pageSet.albumID, scrambleID: pageSet.scrambleID, priority: priority) { [weak self] image in
+            guard let self, self.generation == active, !self.suspended, self.requests.contains(index) else { return }
             self.requests.remove(index)
+            self.subscriptions.removeValue(forKey: index)
             guard let image else { self.failures.insert(index); self.refreshVisiblePages(); return }
             let anchor = self.currentAnchor()
             let changed = self.sizes[index] != image.size
             self.sizes[index] = image.size
             if self.slices[index] != nil { self.images[index] = image }
             if changed { self.rebuild(anchor: anchor) } else { self.refreshVisiblePages() }
+        }
+        if let token { subscriptions[index] = token }
+    }
+
+    private func cancelImages(keeping indices: Set<Int> = []) {
+        for index in Array(requests) where !indices.contains(index) {
+            requests.remove(index)
+            if let token = subscriptions.removeValue(forKey: index) { MoyeReadingImageCache.shared.cancel(token) }
         }
     }
 
@@ -415,11 +432,15 @@ final class MoyeReaderViewport: UIView, UIScrollViewDelegate, UIGestureRecognize
         DispatchQueue.main.async { [weak self] in self?.onState?(state) }
     }
 
-    func suspend() {
-        finishTurn()
+    func pauseLoading() {
         suspended = true
         generation = UUID()
-        requests.removeAll(); failures.removeAll(); images.removeAll()
+        cancelImages()
+    }
+    func suspend() {
+        finishTurn()
+        pauseLoading()
+        failures.removeAll(); images.removeAll()
         slices.values.forEach { $0.image = nil; $0.setNeedsDisplay() }
     }
     func resume() { suspended = false; refreshVisiblePages() }

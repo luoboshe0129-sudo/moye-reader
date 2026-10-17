@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise real iOS services and views in isolated iPhone/iPad simulators."""
+"""Exercise real iOS services and views in an isolated iPad simulator."""
 import http.server
 import json
 import os
@@ -22,10 +22,13 @@ REQUESTS = []
 LONG_LIST = False
 
 
-def png(width=32, height=48, colors=((80, 140, 220),)):
+def png(width=32, height=48, colors=((80, 140, 220),), circle=False):
     def chunk(kind, data):
         return struct.pack('>I', len(data)) + kind + data + struct.pack('>I', zlib.crc32(kind + data))
-    pixels = b''.join(b'\0' + bytes(colors[min(len(colors) - 1, y * len(colors) // height)]) * width for y in range(height))
+    if circle:
+        pixels = b''.join(b'\0' + b''.join(bytes((255, 255, 255) if (x - width / 2) ** 2 + (y - height / 2) ** 2 <= 24 ** 2 else colors[0]) for x in range(width)) for y in range(height))
+    else:
+        pixels = b''.join(b'\0' + bytes(colors[min(len(colors) - 1, y * len(colors) // height)]) * width for y in range(height))
     return b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('>IIBBBBB', width, height, 8, 2, 0, 0, 0)) + chunk(b'IDAT', zlib.compress(pixels)) + chunk(b'IEND', b'')
 
 
@@ -52,6 +55,9 @@ class FixtureSite(http.server.BaseHTTPRequestHandler):
             LONG_LIST, body = True, b'ok'
         elif path == '/fixture/long-list-off':
             LONG_LIST, body = False, b'ok'
+        elif path == '/fixture/queue-count':
+            prefix = query.get('prefix', [''])[0]
+            content_type, body = 'application/json', json.dumps(sum(item['path'].startswith(prefix) for item in REQUESTS)).encode()
         elif path.startswith(('/photo/', '/media/')) and 'moye-anonymous=fixture' not in cookie:
             status, body = 403, b'Anonymous cookie missing'
         elif path in ('/albums', '/search/photos'):
@@ -81,14 +87,26 @@ class FixtureSite(http.server.BaseHTTPRequestHandler):
                 chapter = {'100001': '100201', '100003': '100301', '100004': '100401'}[album]
                 chapters = f'<a href="/photo/{chapter}">唯一一话</a>'
                 date = '2026-10-05' if album == '100003' else '2026-08-08'
-            body = f'<html><body><h1 id="book-name">匿名测试作品</h1><span>上架日期：{date}</span>{chapters}<img src="/slow-decoration"></body></html>'.encode()
+            body = f'<html><body><h1 id="book-name">匿名测试作品</h1><span>上架日期：{date}</span>{chapters}<div class="album-thumb"><img src="/media/photos/100101/1.png"></div><img src="/slow-decoration"></body></html>'.encode()
         elif path.startswith('/photo/'):
             chapter = path.rsplit('/', 1)[1]
             page_array = 'window.page_arr=\'["2.png","1.png"]\';' if chapter == '100102' else ''
-            body = f'<html><body><script>window.aid={chapter};window.scramble_id=0;{page_array}</script><div class="scramble-page"><img data-original="/media/photos/{chapter}/1.png"><img data-original="/media/photos/{chapter}/2.png"></div><img src="/slow-decoration"></body></html>'.encode()
+            count = 12 if chapter.startswith('85000') else 2
+            images = ''.join(f'<img data-original="/media/photos/{chapter}/{index}.png">' for index in range(1, count + 1))
+            body = f'<html><body><script>window.aid={chapter};window.scramble_id=0;{page_array}</script><div class="scramble-page">{images}</div><img src="/slow-decoration"></body></html>'.encode()
+        elif path.startswith('/media/queue-blockers/'):
+            time.sleep(5)
+            content_type, body = 'image/png', png()
+        elif path.startswith('/media/reader-queue/'):
+            if 'fast' not in query and 5 <= int(path.rsplit('/', 1)[1].split('.')[0]) <= 8:
+                time.sleep(5)
+            content_type, body = 'image/png', png()
         elif path.startswith('/media/photos/'):
             _, _, _, chapter, filename = path.split('/')
             content_type, body = 'image/png', page_image(chapter, filename.split('.')[0])
+        elif path == '/media/cover-ratio-test.png':
+            width, height = (320, 200) if 'wide' in query else (120, 300)
+            content_type, body = 'image/png', png(width, height, colors=((80, 140, 220),), circle=True)
         elif path.startswith('/media/albums/'):
             if 'performance-' in path:
                 time.sleep(0.18)
@@ -114,8 +132,14 @@ class FixtureSite(http.server.BaseHTTPRequestHandler):
             pass
 
 
+def tool_command(args):
+    if list(args[:2]) == ['xcrun', 'simctl'] and os.environ.get('MOYE_SIMCTL'):
+        return [os.environ['MOYE_SIMCTL'], *args[2:]]
+    return args
+
+
 def command(*args, **kwargs):
-    return subprocess.run(args, env=ENV, check=True, capture_output=True, text=True, **kwargs)
+    return subprocess.run(tool_command(args), env=ENV, check=True, capture_output=True, text=True, **kwargs)
 
 
 def main():
@@ -144,7 +168,8 @@ def main():
             binary = app / 'IOSSmoke'
             source_root = Path(os.environ.get('MOYE_IOS_SOURCE_ROOT', str(ROOT / 'ios/MoyeReaderIOS')))
             sources = sorted(path for path in source_root.glob('*.swift') if path.name != 'MoyeReaderIOSApp.swift')
-            compile_command = ['xcrun', 'swiftc', '-swift-version', '5', '-D', 'MOYE_IOS_DIAGNOSTICS', '-sdk', str(XCODE / 'Platforms/iPhoneSimulator.platform/Developer/SDKs/iPhoneSimulator27.0.sdk'),
+            sdk = command('xcrun', '--sdk', 'iphonesimulator', '--show-sdk-path').stdout.strip()
+            compile_command = ['xcrun', 'swiftc', '-swift-version', '5', '-D', 'MOYE_IOS_DIAGNOSTICS', '-sdk', sdk,
                                '-target', 'arm64-apple-ios17.0-simulator', '-module-cache-path', str(work / 'cache'), '-framework', 'UIKit', '-framework', 'SwiftUI', '-framework', 'WebKit', '-framework', 'CryptoKit',
                                *map(str, sources), str(ROOT / ('tests/IOSPerformance.swift' if performance else 'tests/IOSSmoke.swift')), '-o', str(binary)]
             print('Compiling isolated iOS smoke app…', flush=True)
@@ -161,9 +186,14 @@ def main():
             shutil.copy2(ROOT / 'ios/MoyeReaderIOS/Assets.xcassets/MoyeMascot.imageset/MoyeMascot.png', app / 'MoyeMascot.png')
             command('codesign', '--force', '--sign', '-', str(app))
             reports = []
-            targets = [('ipad', 'iPad-Pro-13-inch-M5-12GB')] if performance else [('iphone', 'iPhone-17'), ('ipad', 'iPad-Pro-13-inch-M5-12GB')]
+            targets = [('ipad', 'iPad-Pro-13-inch-M5-12GB')]
+            if not performance and os.environ.get('MOYE_TEST_IPHONE') == '1':
+                targets.insert(0, ('iphone', 'iPhone-17'))
+            runtimes = json.loads(command('xcrun', 'simctl', 'list', 'runtimes', '-j').stdout)['runtimes']
+            runtime = max((item for item in runtimes if item.get('isAvailable') and item['identifier'].startswith('com.apple.CoreSimulator.SimRuntime.iOS-')),
+                          key=lambda item: tuple(map(int, item['version'].split('.'))))['identifier']
             for label, device_type in targets:
-                device = command('xcrun', 'simctl', 'create', 'Moye smoke ' + label, 'com.apple.CoreSimulator.SimDeviceType.' + device_type, 'com.apple.CoreSimulator.SimRuntime.iOS-27-0').stdout.strip()
+                device = command('xcrun', 'simctl', 'create', 'Moye smoke ' + label, 'com.apple.CoreSimulator.SimDeviceType.' + device_type, runtime).stdout.strip()
                 devices.append(device)
                 print('Booting isolated ' + label + ' simulator…', flush=True)
                 command('xcrun', 'simctl', 'boot', device)
@@ -171,7 +201,7 @@ def main():
                 command('xcrun', 'simctl', 'install', device, str(app), timeout=60)
                 container = Path(command('xcrun', 'simctl', 'get_app_container', device, bundle_id, 'data').stdout.strip())
                 launch_env = {**ENV, 'SIMCTL_CHILD_MOYE_SMOKE_ROOT': f'http://127.0.0.1:{server.server_port}'}
-                subprocess.run(['xcrun', 'simctl', 'launch', '--stdout=' + str(output / f'{label}.stdout.log'), '--stderr=' + str(output / f'{label}.stderr.log'), device, bundle_id], env=launch_env, check=True, capture_output=True, text=True)
+                subprocess.run(tool_command(['xcrun', 'simctl', 'launch', '--stdout=' + str(output / f'{label}.stdout.log'), '--stderr=' + str(output / f'{label}.stderr.log'), device, bundle_id]), env=launch_env, check=True, capture_output=True, text=True)
                 print('Running ' + label + ' native checks…', flush=True)
                 report_path = container / 'Documents/result.json'
                 deadline = time.monotonic() + 180
@@ -211,11 +241,11 @@ def main():
             assert all(item['ua'].startswith('Mozilla/5.0 (Macintosh;') for item in protected)
             result = {'passed': True, 'devices': reports, 'requests': len(REQUESTS), 'zip_checks': 'original PNG bytes, chapter order, page_arr order', 'parser_parity': True}
             (output / 'result.json').write_text(json.dumps(result, ensure_ascii=False, indent=2) + '\n')
-            print('iPhone and iPad checks passed, ZIP contents and shared parser parity verified.', flush=True)
+            print('Device checks passed, ZIP contents and shared parser parity verified.', flush=True)
     finally:
         for device in devices:
-            subprocess.run(['xcrun', 'simctl', 'shutdown', device], env=ENV, capture_output=True)
-            subprocess.run(['xcrun', 'simctl', 'delete', device], env=ENV, capture_output=True)
+            subprocess.run(tool_command(['xcrun', 'simctl', 'shutdown', device]), env=ENV, capture_output=True, timeout=60)
+            subprocess.run(tool_command(['xcrun', 'simctl', 'delete', device]), env=ENV, capture_output=True, timeout=60)
         server.shutdown()
         server.server_close()
 

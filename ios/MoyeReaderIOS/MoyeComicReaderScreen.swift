@@ -13,6 +13,7 @@ struct MoyeComicReaderScreen: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.scenePhase) private var scenePhase
     @ObservedObject var catalog: MoyeCatalogService
+    let favorites: MoyeFavoritesStore
     @State private var route: MoyeReaderRoute
     @StateObject private var bridge = MoyeReaderBridge()
     @State private var pageIndex = 0
@@ -24,8 +25,9 @@ struct MoyeComicReaderScreen: View {
     @State private var showDownload = false
     @AppStorage("MoyeReader.ReadingMode") private var modeValue = "spread"
 
-    init(route: MoyeReaderRoute, catalog: MoyeCatalogService) {
+    init(route: MoyeReaderRoute, catalog: MoyeCatalogService, favorites: MoyeFavoritesStore? = nil) {
         self.catalog = catalog
+        self.favorites = favorites ?? .shared
         _route = State(initialValue: route)
     }
     private var mode: MoyeReadingMode { MoyeReadingMode.resolve(modeValue) }
@@ -58,13 +60,19 @@ struct MoyeComicReaderScreen: View {
         .toolbar(.hidden, for: .navigationBar)
         .environment(\.colorScheme, .dark)
         .statusBarHidden(!showChrome)
-        .onAppear { modeValue = mode.rawValue; MoyeChapterPreloader.shared.start(route: route, catalog: catalog) }
+        .onAppear {
+            modeValue = mode.rawValue
+            bridge.resume()
+            MoyeChapterPreloader.shared.start(route: route, catalog: catalog, owner: requestOwner)
+        }
         .onChange(of: bridge.state.page) { _, page in if mode != .spread { pageIndex = page } }
         .onChange(of: scenePhase) { _, phase in
             if phase == .active { bridge.resume() } else if phase == .background { bridge.suspend() }
         }
         .onDisappear {
             chapterRequest = UUID()
+            bridge.pauseLoading()
+            MoyeChapterPreloader.shared.cancel(owner: requestOwner)
             if changingChapter { catalog.cancel(owner: requestOwner); changingChapter = false }
         }
         .sheet(isPresented: $showDownload) {
@@ -90,6 +98,7 @@ struct MoyeComicReaderScreen: View {
                     Text(route.chapter.title).font(.caption).foregroundStyle(.secondary).lineLimit(1)
                 }
                 Spacer(minLength: 0)
+                MoyeFavoriteButton(comic: route.comic, favorites: favorites)
                 Button { showDownload = true } label: { Image(systemName: "arrow.down.to.line").frame(width: 36, height: 38) }
                     .accessibilityLabel("下载章节")
                 Menu {
@@ -164,14 +173,21 @@ struct MoyeComicReaderScreen: View {
         guard !changingChapter, chapter.id != route.chapter.id else { return }
         chapterRequest = UUID()
         let active = chapterRequest
+        bridge.pauseLoading()
+        MoyeChapterPreloader.shared.cancel(owner: requestOwner)
         changingChapter = true
         catalog.loadPages(for: route.comic, chapter: chapter, owner: requestOwner) { pages in
             guard chapterRequest == active else { return }
             changingChapter = false
-            guard let pages else { alertMessage = catalog.errorMessage ?? "请检查网络后重试。"; return }
+            guard let pages else {
+                bridge.resume()
+                MoyeChapterPreloader.shared.start(route: route, catalog: catalog, owner: requestOwner)
+                alertMessage = catalog.errorMessage ?? "请检查网络后重试。"
+                return
+            }
             pageIndex = 0
             route = MoyeReaderRoute(comic: route.comic, title: route.title, chapter: chapter, chapters: route.chapters, pages: pages)
-            MoyeChapterPreloader.shared.start(route: route, catalog: catalog)
+            MoyeChapterPreloader.shared.start(route: route, catalog: catalog, owner: requestOwner)
         }
     }
 }
